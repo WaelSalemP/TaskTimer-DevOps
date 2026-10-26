@@ -48,7 +48,7 @@ public static class ProviderFactory
 
 public abstract class HttpProviderBase : IDisposable
 {
-    protected readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
+    protected readonly HttpClient Http = RetryHandler.CreateClient(TimeSpan.FromSeconds(30));
 
     protected async Task<JsonNode> SendAsync(HttpMethod method, string url, object? body, string contentType,
         CancellationToken ct)
@@ -65,18 +65,29 @@ public abstract class HttpProviderBase : IDisposable
 
         // Azure DevOps answers 203 + sign-in HTML when the PAT is invalid or expired.
         if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.NonAuthoritativeInformation)
-            throw new InvalidOperationException("Authentication failed. Check the personal access token and its scopes.");
+            throw new InvalidOperationException(
+                "Authentication failed. Check the personal access token and its scopes, or for GitHub sign in again in the settings.");
 
         if (!response.IsSuccessStatusCode)
         {
             string? message = null;
-            try { message = JsonNode.Parse(text)?["message"]?.ToString(); }
+            try
+            {
+                var error = JsonNode.Parse(text);
+                message = error?["message"]?.ToString();
+                // GitHub explains a "Validation Failed" in a list of errors.
+                var details = error?["errors"]?.AsArray()
+                    .Select(e => e is JsonObject o ? o["message"]?.ToString() ?? o["code"]?.ToString() : e?.ToString())
+                    .Where(d => !string.IsNullOrEmpty(d)).ToList();
+                if (details is { Count: > 0 }) message += " - " + string.Join("; ", details);
+            }
             catch (JsonException) { }
             throw new InvalidOperationException(
                 $"{(int)response.StatusCode} {response.ReasonPhrase}: {message ?? text}");
         }
 
-        return JsonNode.Parse(text) ?? new JsonObject();
+        // Deletes and some updates answer with no content at all.
+        return string.IsNullOrWhiteSpace(text) ? new JsonObject() : JsonNode.Parse(text) ?? new JsonObject();
     }
 
     /// <summary>Parses an ISO date from the API into local time.</summary>
@@ -449,12 +460,20 @@ public sealed class GitHubProvider : HttpProviderBase, IWorkItemProvider
 
     public GitHubProvider(AppSettings settings)
     {
-        _api = string.IsNullOrWhiteSpace(settings.Url) ? "https://api.github.com" : settings.Url.Trim().TrimEnd('/');
-        Http.DefaultRequestHeaders.UserAgent.ParseAdd("TaskTimer/1.0");
-        Http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
-        Http.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
-        Http.DefaultRequestHeaders.Authorization =
-            new AuthenticationHeaderValue("Bearer", SettingsStore.GetPat(settings));
+        _api = ApiUrl(settings);
+        Configure(Http, settings);
+    }
+
+    public static string ApiUrl(AppSettings settings) =>
+        string.IsNullOrWhiteSpace(settings.Url) ? "https://api.github.com" : settings.Url.Trim().TrimEnd('/');
+
+    /// <summary>The headers every GitHub API call needs, with the signed-in user's token.</summary>
+    public static void Configure(HttpClient http, AppSettings settings)
+    {
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("TaskTimer/1.0");
+        http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+        http.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
+        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", SettingsStore.GetPat(settings));
     }
 
     public async Task TestAsync(CancellationToken ct = default) =>

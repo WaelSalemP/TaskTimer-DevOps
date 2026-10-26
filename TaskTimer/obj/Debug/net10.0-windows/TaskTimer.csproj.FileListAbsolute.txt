@@ -12,3 +12,10 @@ C:\Temp\DevOps\TaskTimer\obj\Debug\net10.0-windows\refint\TaskTimer.dll
 C:\Temp\DevOps\TaskTimer\obj\Debug\net10.0-windows\TaskTimer.pdb
 C:\Temp\DevOps\TaskTimer\obj\Debug\net10.0-windows\TaskTimer.genruntimeconfig.cache
 C:\Temp\DevOps\TaskTimer\obj\Debug\net10.0-windows\ref\TaskTimer.dll
+C:\Users\localadmin\AppData\Local\Temp\tt-build\TaskTimer.exe
+C:\Users\localadmin\AppData\Local\Temp\tt-build\TaskTimer.deps.json
+C:\Users\localadmin\AppData\Local\Temp\tt-build\TaskTimer.runtimeconfig.json
+C:\Users\localadmin\AppData\Local\Temp\tt-build\TaskTimer.dll
+C:\Users\localadmin\AppData\Local\Temp\tt-build\TaskTimer.pdb
+C:\Temp\DevOps\TaskTimer\obj\Debug\net10.0-windows\TaskTimer.csproj.AssemblyReference.cache
+C:\Temp\DevOps\TaskTimer\obj\Debug\net10.0-windows\TaskTimer.csproj.Up2Date

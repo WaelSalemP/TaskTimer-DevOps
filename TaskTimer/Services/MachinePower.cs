@@ -26,7 +26,7 @@ public static partial class MachinePower
     private const string LcsResource = "https://lcsapi.lcs.dynamics.com";
     private const string ArmResource = "https://management.azure.com";
     private const string ArmComputeApi = "api-version=2024-07-01";
-    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(60) };
+    private static readonly HttpClient Http = RetryHandler.CreateClient(TimeSpan.FromSeconds(60));
 
     /// <summary>Subscription found for a resource group, so the search runs once per session.</summary>
     private static readonly ConcurrentDictionary<string, string> SubscriptionByGroup = new(StringComparer.OrdinalIgnoreCase);

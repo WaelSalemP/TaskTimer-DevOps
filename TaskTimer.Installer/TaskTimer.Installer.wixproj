@@ -8,7 +8,7 @@
     <OutputName>TaskTimerSetup</OutputName>
     <InstallerPlatform>x64</InstallerPlatform>
     <!-- Raise this for every release: Windows Installer only upgrades to a higher version. -->
-    <ProductVersion>1.0.18</ProductVersion>
+    <ProductVersion>1.0.21</ProductVersion>
     <AppPublishDir>$(MSBuildProjectDirectory)\obj\app\</AppPublishDir>
     <DefineConstants>AppPublishDir=$(AppPublishDir);ProductVersion=$(ProductVersion)</DefineConstants>
   </PropertyGroup>

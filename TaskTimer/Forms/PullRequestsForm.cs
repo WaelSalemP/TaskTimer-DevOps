@@ -3,10 +3,11 @@ using TaskTimer.Services;
 
 namespace TaskTimer.Forms;
 
-/// <summary>Lists open Azure Repos pull requests and lets the user approve, complete or create them.</summary>
+/// <summary>Lists open pull requests (Azure Repos or GitHub) and lets the user approve, complete or create them.</summary>
 public sealed class PullRequestsForm : Form
 {
     private readonly AppSettings _settings;
+    private readonly PullRequestFeatures _features;
     private readonly IReadOnlyList<string> _projects;
     private readonly WorkItem? _currentTask;
     private readonly IReadOnlyList<WorkItem> _linkable;
@@ -28,13 +29,16 @@ public sealed class PullRequestsForm : Form
     private readonly Button _open = NewButton("OpenInBrowser", Theme.Neutral);
     private readonly Button _review = NewButton("PrReview", Theme.Primary);
     private readonly Button _workItems = NewButton("PrWorkItems", Theme.Neutral);
+    private readonly Button _repoFilter = NewButton("PrRepoFilterAll", Theme.Neutral);
+    private readonly Button _repositories = NewButton("Repositories", Theme.Neutral);
 
-    /// <param name="projects">Azure DevOps projects to look in.</param>
+    /// <param name="projects">Azure DevOps projects to look in; not used for GitHub.</param>
     /// <param name="currentTask">Task selected in the main window, offered as the link for a new pull request.</param>
     /// <param name="linkable">Azure DevOps work items a new pull request can be linked to.</param>
     public PullRequestsForm(AppSettings settings, IReadOnlyList<string> projects, WorkItem? currentTask, IReadOnlyList<WorkItem> linkable)
     {
         _settings = settings;
+        _features = PullRequestServices.Features(settings);
         _projects = projects;
         _currentTask = currentTask;
         _linkable = linkable;
@@ -60,12 +64,15 @@ public sealed class PullRequestsForm : Form
 
         _onlyMine.Text = Loc.T("PrOnlyMine");
         var top = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8, 6, 8, 0) };
-        top.Controls.AddRange(new Control[] { _onlyMine, _refresh, _status, _blocked });
+        top.Controls.AddRange(new Control[] { _onlyMine, _repoFilter, _refresh, _status, _blocked });
+        UpdateRepoFilterText();
 
         var close = NewButton("MachineClose", Theme.Neutral);
         close.DialogResult = DialogResult.OK;
         var bottom = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(8) };
-        bottom.Controls.AddRange(new Control[] { _create, _review, _workItems, _approve, _complete, _open, close });
+        bottom.Controls.AddRange(new Control[] { _create, _review, _workItems, _approve, _complete, _open, _repositories, close });
+        // Only Azure DevOps links pull requests to work items.
+        _workItems.Visible = _features.WorkItems;
 
         Controls.Add(_grid);
         Controls.Add(top);
@@ -80,6 +87,12 @@ public sealed class PullRequestsForm : Form
         _open.Click += (_, _) => { if (Selected is { } pr) OpenInBrowser(pr.WebUrl); };
         _review.Click += async (_, _) => await ReviewAsync();
         _workItems.Click += (_, _) => { if (Selected is { } pr) LinkedWorkItemsForm.Show(this, _settings, pr); };
+        _repoFilter.Click += async (_, _) => await ChooseRepositoriesAsync();
+        _repositories.Click += async (_, _) =>
+        {
+            using (var form = new RepositoriesForm(_settings, _projects)) form.ShowDialog(this);
+            await LoadAsync(); // repositories or branches may be gone
+        };
         _grid.CellDoubleClick += async (_, e) => { if (e.RowIndex >= 0) await ReviewAsync(); };
         _grid.SelectionChanged += (_, _) => UpdateButtons();
         Shown += async (_, _) => await LoadAsync();
@@ -98,13 +111,37 @@ public sealed class PullRequestsForm : Form
     private readonly Label _blocked = new() { AutoSize = true, Margin = new Padding(24, 8, 3, 3), ForeColor = Theme.Coral };
 
     /// <summary>Pull requests whose checks could not be read; they are not held back by checks.</summary>
-    private readonly HashSet<int> _checksUnavailable = new();
+    private readonly HashSet<string> _checksUnavailable = new();
 
     /// <summary>Required checks that failed, or null while they are still being fetched.</summary>
     private List<PolicyCheck>? FailedChecks(PullRequest pr) =>
-        _checks.TryGetValue(pr.Id, out var checks) ? checks.Where(c => c.Failed && c.IsBlocking).ToList()
-        : _checksUnavailable.Contains(pr.Id) ? new List<PolicyCheck>()
+        _checks.TryGetValue(pr.Key, out var checks) ? checks.Where(c => c.Failed && c.IsBlocking).ToList()
+        : _checksUnavailable.Contains(pr.Key) ? new List<PolicyCheck>()
         : null;
+
+    private void UpdateRepoFilterText() =>
+        _repoFilter.Text = _settings.PullRequestRepositories.Count == 0
+            ? Loc.T(_features.UsesProjects ? "PrRepoFilterAll" : "PrRepoFilterInvolved")
+            : Loc.T("PrRepoFilterSome", _settings.PullRequestRepositories.Count);
+
+    /// <summary>Lets the user tick the repositories to show; saved with the account.</summary>
+    private async Task ChooseRepositoriesAsync()
+    {
+        List<GitRepository> repositories = new();
+        var loaded = await RunAsync(async service =>
+        {
+            foreach (var project in _features.UsesProjects ? _projects : new[] { "" })
+                repositories.AddRange(await service.GetRepositoriesAsync(project));
+        });
+        if (!loaded || IsDisposed) return;
+
+        using var form = new RepositoryFilterForm(repositories, _settings.PullRequestRepositories, _features.UsesProjects);
+        if (form.ShowDialog(this) != DialogResult.OK) return;
+        _settings.PullRequestRepositories = form.Chosen.ToList();
+        SettingsStore.Save(_settings);
+        UpdateRepoFilterText();
+        await LoadAsync();
+    }
 
     /// <summary>
     /// Approving and completing are allowed only once the checks are known and no required one has
@@ -127,13 +164,13 @@ public sealed class PullRequestsForm : Form
             : "";
     }
 
-    private async Task<bool> RunAsync(Func<PullRequestService, Task> action)
+    private async Task<bool> RunAsync(Func<IPullRequestService, Task> action)
     {
         UseWaitCursor = true;
-        foreach (var button in new[] { _refresh, _create, _approve, _complete }) button.Enabled = false;
+        foreach (var button in new[] { _refresh, _create, _approve, _complete, _repoFilter }) button.Enabled = false;
         try
         {
-            using var service = new PullRequestService(_settings);
+            using var service = PullRequestServices.Create(_settings);
             await action(service);
             return true;
         }
@@ -148,7 +185,7 @@ public sealed class PullRequestsForm : Form
             if (!IsDisposed)
             {
                 UseWaitCursor = false;
-                _refresh.Enabled = _create.Enabled = true;
+                _refresh.Enabled = _create.Enabled = _repoFilter.Enabled = true;
                 UpdateButtons();
             }
         }
@@ -163,7 +200,7 @@ public sealed class PullRequestsForm : Form
         _checksVersion++;
         await RunAsync(async service =>
         {
-            _pullRequests = await service.GetActiveAsync(_projects);
+            _pullRequests = await service.GetActiveAsync(_projects, _settings.PullRequestRepositories);
             _myId = await service.GetMyIdAsync();
         });
         if (!IsDisposed) ShowList();
@@ -171,7 +208,7 @@ public sealed class PullRequestsForm : Form
 
     private void ShowList()
     {
-        var selectedId = Selected?.Id;
+        var selectedKey = Selected?.Key;
         var shown = _onlyMine.Checked
             ? _pullRequests.Where(p => p.IAmReviewer || p.CreatedById == _myId).ToList()
             : _pullRequests;
@@ -182,23 +219,23 @@ public sealed class PullRequestsForm : Form
             var index = _grid.Rows.Add(pr.Id, title, pr.RepositoryName, $"{pr.SourceBranch} → {pr.TargetBranch}", pr.CreatedBy,
                 pr.Reviewers, VoteText(pr.MyVote, pr.IAmReviewer), "…", pr.Created?.ToString("yyyy-MM-dd") ?? "");
             _grid.Rows[index].Tag = pr;
-            if (_checks.TryGetValue(pr.Id, out var known)) ShowChecks(_grid.Rows[index], pr, known);
-            if (pr.Id == selectedId) _grid.CurrentCell = _grid.Rows[index].Cells[0];
+            if (_checks.TryGetValue(pr.Key, out var known)) ShowChecks(_grid.Rows[index], pr, known);
+            if (pr.Key == selectedKey) _grid.CurrentCell = _grid.Rows[index].Cells[0];
         }
         _status.Text = Loc.T("PrCount", shown.Count);
         UpdateButtons();
-        _ = LoadChecksAsync(shown.Where(p => !_checks.ContainsKey(p.Id)).ToList());
+        _ = LoadChecksAsync(shown.Where(p => !_checks.ContainsKey(p.Key)).ToList());
     }
 
-    /// <summary>Checks per pull request ID; kept until the next Refresh.</summary>
-    private readonly Dictionary<int, List<PolicyCheck>> _checks = new();
+    /// <summary>Checks per pull request key; kept until the next Refresh.</summary>
+    private readonly Dictionary<string, List<PolicyCheck>> _checks = new();
     private int _checksVersion;
 
     /// <summary>Fetches the checks of the listed pull requests a few at a time; each row fills in when its answer arrives.</summary>
     private async Task LoadChecksAsync(List<PullRequest> pullRequests)
     {
         var version = _checksVersion;
-        using var service = new PullRequestService(_settings);
+        using var service = PullRequestServices.Create(_settings);
         using var gate = new SemaphoreSlim(6);
         await Task.WhenAll(pullRequests.Select(async pr =>
         {
@@ -207,21 +244,21 @@ public sealed class PullRequestsForm : Form
             {
                 var checks = await service.GetChecksAsync(pr);
                 if (version != _checksVersion || IsDisposed) return;
-                _checks[pr.Id] = checks;
-                if (RowOf(pr.Id) is { } row) ShowChecks(row, pr, checks);
-                if (Selected?.Id == pr.Id) UpdateButtons();
+                _checks[pr.Key] = checks;
+                if (RowOf(pr.Key) is { } row) ShowChecks(row, pr, checks);
+                if (Selected?.Key == pr.Key) UpdateButtons();
             }
             catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or TaskCanceledException)
             {
-                if (!IsDisposed && RowOf(pr.Id) is { } row)
+                if (!IsDisposed && RowOf(pr.Key) is { } row)
                 {
                     row.Cells["PrColChecks"].Value = Loc.T("PrChecksUnknown");
                     row.Cells["PrColChecks"].ToolTipText = ex.Message;
                 }
                 if (!IsDisposed)
                 {
-                    _checksUnavailable.Add(pr.Id);
-                    if (Selected?.Id == pr.Id) UpdateButtons();
+                    _checksUnavailable.Add(pr.Key);
+                    if (Selected?.Key == pr.Key) UpdateButtons();
                 }
             }
             finally
@@ -231,8 +268,8 @@ public sealed class PullRequestsForm : Form
         }));
     }
 
-    private DataGridViewRow? RowOf(int id) =>
-        _grid.Rows.Cast<DataGridViewRow>().FirstOrDefault(r => (r.Tag as PullRequest)?.Id == id);
+    private DataGridViewRow? RowOf(string key) =>
+        _grid.Rows.Cast<DataGridViewRow>().FirstOrDefault(r => (r.Tag as PullRequest)?.Key == key);
 
     /// <summary>One-line summary in the Checks column, coloured by outcome, with every check listed in its tooltip.</summary>
     private static void ShowChecks(DataGridViewRow row, PullRequest pr, List<PolicyCheck> checks)
@@ -275,7 +312,7 @@ public sealed class PullRequestsForm : Form
         var failed = FailedChecks(pr);
         if (failed == null)
         {
-            await RunAsync(async service => _checks[pr.Id] = await service.GetChecksAsync(pr));
+            await RunAsync(async service => _checks[pr.Key] = await service.GetChecksAsync(pr));
             failed = FailedChecks(pr) ?? new List<PolicyCheck>();
         }
         var reason = failed.Count > 0 ? Loc.T("PrBlockedChecks", string.Join(", ", failed.Select(c => c.Name))) : null;
@@ -292,7 +329,7 @@ public sealed class PullRequestsForm : Form
     private async Task CompleteAsync()
     {
         if (Selected is not { } pr || !_complete.Enabled) return;
-        using var form = new CompletePullRequestForm(pr);
+        using var form = new CompletePullRequestForm(pr, _features);
         if (form.ShowDialog(this) != DialogResult.OK) return;
         if (await RunAsync(service => service.CompleteAsync(pr, form.Options))) await LoadAsync();
     }
@@ -302,8 +339,7 @@ public sealed class PullRequestsForm : Form
         using var form = new NewPullRequestForm(_settings, _projects, _currentTask, _linkable);
         if (form.ShowDialog(this) != DialogResult.OK) return;
         await LoadAsync();
-        var created = _grid.Rows.Cast<DataGridViewRow>().FirstOrDefault(r => (r.Tag as PullRequest)?.Id == form.CreatedId);
-        if (created != null) _grid.CurrentCell = created.Cells[0];
+        if (RowOf(form.CreatedKey) is { } created) _grid.CurrentCell = created.Cells[0];
     }
 
     private void OpenInBrowser(string url)
@@ -322,18 +358,24 @@ public sealed class PullRequestsForm : Form
 /// <summary>Asks how to complete (merge) a pull request.</summary>
 public sealed class CompletePullRequestForm : Form
 {
-    private static readonly string[] Strategies = { "noFastForward", "squash", "rebase", "rebaseMerge" };
+    private static readonly Dictionary<string, string> StrategyText = new()
+    {
+        ["noFastForward"] = "PrMergeNoFf", ["squash"] = "PrMergeSquash", ["rebase"] = "PrMergeRebase", ["rebaseMerge"] = "PrMergeSemiLinear"
+    };
 
+    private readonly IReadOnlyList<string> _strategies;
     private readonly ComboBox _strategy = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 320 };
     private readonly CheckBox _deleteBranch = new() { AutoSize = true, Checked = true };
     private readonly CheckBox _completeItems = new() { AutoSize = true };
     private readonly TextBox _message = new() { Multiline = true, Width = 460, Height = 70, ScrollBars = ScrollBars.Vertical };
 
-    public PullRequestCompletion Options => new(Strategies[Math.Max(0, _strategy.SelectedIndex)], _deleteBranch.Checked,
+    public PullRequestCompletion Options => new(_strategies[Math.Max(0, _strategy.SelectedIndex)], _deleteBranch.Checked,
         _completeItems.Checked, _message.Text.Trim());
 
-    public CompletePullRequestForm(PullRequest pr)
+    public CompletePullRequestForm(PullRequest pr, PullRequestFeatures features)
     {
+        _strategies = features.MergeStrategies;
+        _completeItems.Visible = features.WorkItems;
         Icon = Program.AppIcon;
         Text = Loc.T("PrComplete");
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -346,7 +388,7 @@ public sealed class CompletePullRequestForm : Form
         Loc.ApplyDirection(this);
         Theme.StyleForm(this, Theme.Surface);
 
-        _strategy.Items.AddRange(new object[] { Loc.T("PrMergeNoFf"), Loc.T("PrMergeSquash"), Loc.T("PrMergeRebase"), Loc.T("PrMergeSemiLinear") });
+        _strategy.Items.AddRange(_strategies.Select(s => (object)Loc.T(StrategyText[s])).ToArray());
         _strategy.SelectedIndex = 0;
         _deleteBranch.Text = Loc.T("PrDeleteBranch");
         _completeItems.Text = Loc.T("PrCompleteItems");
@@ -377,11 +419,14 @@ public sealed class CompletePullRequestForm : Form
     }
 }
 
-/// <summary>Creates a pull request in an Azure Repos repository, optionally linked to the current task.</summary>
+/// <summary>Creates a pull request in an Azure Repos or GitHub repository, optionally linked to the current task (Azure DevOps).</summary>
 public sealed class NewPullRequestForm : Form
 {
     private readonly AppSettings _settings;
+    private readonly PullRequestFeatures _features;
     private readonly WorkItem? _task;
+    /// <summary>GitHub: the current issue's repository ("owner/name"), chosen first.</summary>
+    private readonly string _preferredRepository;
     private readonly ComboBox _project = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 360 };
     private readonly ComboBox _repository = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 360 };
     private readonly ComboBox _source = new() { DropDownStyle = ComboBoxStyle.DropDown, Width = 360, AutoCompleteMode = AutoCompleteMode.SuggestAppend, AutoCompleteSource = AutoCompleteSource.ListItems };
@@ -407,13 +452,16 @@ public sealed class NewPullRequestForm : Form
     private readonly Button _createButton = new() { AutoSize = true, Padding = new Padding(12, 3, 12, 3) };
     private int _loadVersion;
 
-    public int CreatedId { get; private set; }
+    /// <summary>The new pull request's <see cref="PullRequest.Key"/>.</summary>
+    public string CreatedKey { get; private set; } = "";
 
     public NewPullRequestForm(AppSettings settings, IReadOnlyList<string> projects, WorkItem? task, IReadOnlyList<WorkItem> linkable)
     {
         _settings = settings;
+        _features = PullRequestServices.Features(settings);
         // Only an Azure DevOps work item can be linked; local and GitHub items cannot.
         _task = task != null && task.Key.StartsWith("ado:", StringComparison.Ordinal) ? task : null;
+        _preferredRepository = task != null && task.Key.StartsWith("gh:", StringComparison.Ordinal) ? task.Project : "";
 
         Icon = Program.AppIcon;
         Text = Loc.T("PrNew");
@@ -429,12 +477,16 @@ public sealed class NewPullRequestForm : Form
         var table = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Padding = new Padding(12) };
         table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        void Row(string key, Control field)
+        // Returns the label, so a row that does not apply to the provider can be hidden (it then takes no space).
+        Label Row(string key, Control field)
         {
-            table.Controls.Add(new Label { Text = Loc.T(key), AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Top, Margin = new Padding(3, 8, 12, 8) });
+            var label = new Label { Text = Loc.T(key), AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Top, Margin = new Padding(3, 8, 12, 8) };
+            table.Controls.Add(label);
             table.Controls.Add(field);
+            return label;
         }
-        Row("TaskProject", _project);
+        var projectLabel = Row("TaskProject", _project);
+        projectLabel.Visible = _project.Visible = _features.UsesProjects;
         Row("PrRepository", _repository);
         Row("PrSource", _source);
         Row("PrTarget", _target);
@@ -465,9 +517,10 @@ public sealed class NewPullRequestForm : Form
         };
         var searchPanel = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0) };
         searchPanel.Controls.AddRange(new Control[] { _linkSearch, _linkSearchButton, _linkHint });
-        Row("PrLinks", searchPanel);
+        var linksLabel = Row("PrLinks", searchPanel);
         table.Controls.Add(new Label());
         table.Controls.Add(_links);
+        linksLabel.Visible = searchPanel.Visible = _links.Visible = _features.WorkItems;
         FillLinks();
 
         _createButton.Text = Loc.T("PrCreate");
@@ -487,8 +540,14 @@ public sealed class NewPullRequestForm : Form
         _createButton.Click += async (_, _) => await CreateAsync();
         // A pull request for a task is usually named after it.
         if (_task != null) _title.Text = _task.Title;
-        Shown += (_, _) =>
+        if (!_features.UsesProjects) ClientSize = new Size(700, 420); // no project and no work item links
+        Shown += async (_, _) =>
         {
+            if (!_features.UsesProjects)
+            {
+                await LoadRepositoriesAsync();
+                return;
+            }
             var preferred = _task?.Project ?? projects.FirstOrDefault();
             _project.SelectedItem = projects.FirstOrDefault(p => string.Equals(p, preferred, StringComparison.OrdinalIgnoreCase));
             if (_project.SelectedIndex < 0 && _project.Items.Count > 0) _project.SelectedIndex = 0;
@@ -528,7 +587,7 @@ public sealed class NewPullRequestForm : Form
         UseWaitCursor = true;
         try
         {
-            using var service = new PullRequestService(_settings);
+            using var service = PullRequestServices.Create(_settings);
             var found = await service.SearchWorkItemsAsync(project, text);
             if (IsDisposed) return;
             foreach (var item in found.Where(f => _allLinks.All(o => o.Id != f.Id)))
@@ -550,34 +609,43 @@ public sealed class NewPullRequestForm : Form
     private void ShowError(Exception ex) =>
         MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error, MessageBoxDefaultButton.Button1, Loc.MsgOptions);
 
+    /// <summary>The chosen team project (Azure DevOps), "" for GitHub, or null when none is chosen yet.</summary>
+    private string? CurrentProject => _features.UsesProjects ? _project.SelectedItem as string : "";
+
     private async Task LoadRepositoriesAsync()
     {
-        if (_project.SelectedItem is not string project) return;
+        if (CurrentProject is not { } project) return;
         var version = ++_loadVersion;
         _repository.Items.Clear();
         _source.Items.Clear();
         _target.Items.Clear();
+        UseWaitCursor = true;
         try
         {
-            using var service = new PullRequestService(_settings);
+            using var service = PullRequestServices.Create(_settings);
             var repositories = await service.GetRepositoriesAsync(project);
             if (version != _loadVersion || IsDisposed) return;
             _repository.Items.AddRange(repositories.Cast<object>().ToArray());
-            if (_repository.Items.Count > 0) _repository.SelectedIndex = 0;
+            _repository.SelectedItem = repositories.FirstOrDefault(r => string.Equals(r.Id, _preferredRepository, StringComparison.OrdinalIgnoreCase));
+            if (_repository.SelectedIndex < 0 && _repository.Items.Count > 0) _repository.SelectedIndex = 0;
         }
         catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or TaskCanceledException)
         {
             ShowError(ex);
         }
+        finally
+        {
+            if (!IsDisposed) UseWaitCursor = false;
+        }
     }
 
     private async Task LoadBranchesAsync()
     {
-        if (_project.SelectedItem is not string project || _repository.SelectedItem is not GitRepository repository) return;
+        if (CurrentProject is not { } project || _repository.SelectedItem is not GitRepository repository) return;
         var version = ++_loadVersion;
         try
         {
-            using var service = new PullRequestService(_settings);
+            using var service = PullRequestServices.Create(_settings);
             var branches = await service.GetBranchesAsync(project, repository.Id);
             if (version != _loadVersion || IsDisposed) return;
             _source.Items.Clear();
@@ -612,11 +680,12 @@ public sealed class NewPullRequestForm : Form
         UseWaitCursor = true;
         try
         {
-            using var service = new PullRequestService(_settings);
-            var (id, _) = await service.CreateAsync((string)_project.SelectedItem!, (GitRepository)_repository.SelectedItem!,
+            using var service = PullRequestServices.Create(_settings);
+            var repository = (GitRepository)_repository.SelectedItem!;
+            var (id, _) = await service.CreateAsync(CurrentProject ?? "", repository,
                 source, target, _title.Text.Trim(), _description.Text.Trim(), _draft.Checked,
                 _checkedIds.ToList());
-            CreatedId = id;
+            CreatedKey = $"{repository.Id}#{id}";
             DialogResult = DialogResult.OK;
             Close();
         }

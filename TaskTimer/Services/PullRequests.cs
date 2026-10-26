@@ -6,10 +6,16 @@ using TaskTimer.Models;
 
 namespace TaskTimer.Services;
 
+/// <param name="HeadCommit">GitHub: the source branch's latest commit, which checks and line comments refer to.</param>
 public sealed record PullRequest(
     int Id, string Title, string Project, string RepositoryId, string RepositoryName,
     string SourceBranch, string TargetBranch, string CreatedBy, string CreatedById, DateTime? Created,
-    bool IsDraft, string MergeStatus, int MyVote, bool IAmReviewer, string Reviewers, string WebUrl, string ProjectId);
+    bool IsDraft, string MergeStatus, int MyVote, bool IAmReviewer, string Reviewers, string WebUrl, string ProjectId,
+    string HeadCommit = "")
+{
+    /// <summary>Unique across repositories: GitHub numbers pull requests per repository.</summary>
+    public string Key => $"{RepositoryId}#{Id}";
+}
 
 /// <summary>One branch policy evaluated on a pull request (build, reviewers, linked work items, comments...).</summary>
 /// <param name="Status">"approved" (passed), "rejected" (failed), "running", "queued", "broken" or "notApplicable".</param>
@@ -32,7 +38,8 @@ public sealed record PullRequestFileChange(string Path, string OriginalPath, str
         var mark = IsAdd ? "A" : IsDelete ? "D" : ChangeType.Contains("rename", StringComparison.OrdinalIgnoreCase) ? "R" : "M";
         // File name first: paths are long and share most of their beginning.
         var slash = Path.LastIndexOf('/');
-        return slash < 0 ? $"{mark}  {Path}" : $"{mark}  {Path[(slash + 1)..]}   ({Path[..slash]})";
+        // A file at the root ("/README") has no folder to show.
+        return slash <= 0 ? $"{mark}  {Path.TrimStart('/')}" : $"{mark}  {Path[(slash + 1)..]}   ({Path[..slash]})";
     }
 }
 
@@ -46,7 +53,14 @@ public sealed record LinkedWorkItem(string Id, string Type, string Title, string
     public override string ToString() => $"{Type} {Id} - {Title}";
 }
 
-public sealed record GitRepository(string Id, string Name, string DefaultBranch)
+/// <param name="Id">Azure DevOps: the repository's GUID. GitHub: "owner/name".</param>
+/// <param name="Project">Azure DevOps: the team project. GitHub: the owner (user or organization).</param>
+/// <param name="Visibility">GitHub: "public", "private" or "internal". Empty for Azure DevOps.</param>
+/// <param name="CanDelete">The signed-in user may delete it; true when that could not be checked (the server decides).</param>
+/// <param name="CanRename">The signed-in user may rename it; true when that could not be checked.</param>
+/// <param name="DeleteNeedsSignIn">GitHub: the user is an admin, but signed in before the app asked for permission to delete.</param>
+public sealed record GitRepository(string Id, string Name, string DefaultBranch, string Project = "", string Visibility = "",
+    string WebUrl = "", bool CanDelete = true, bool CanRename = true, bool DeleteNeedsSignIn = false)
 {
     public override string ToString() => Name;
 }
@@ -55,8 +69,69 @@ public sealed record GitRepository(string Id, string Name, string DefaultBranch)
 /// <param name="MergeStrategy">"noFastForward", "squash", "rebase" or "rebaseMerge" (Azure DevOps names).</param>
 public sealed record PullRequestCompletion(string MergeStrategy, bool DeleteSourceBranch, bool CompleteWorkItems, string MergeMessage);
 
+/// <summary>What a provider's pull requests and repositories support, so the windows only offer what works.</summary>
+/// <param name="UsesProjects">Repositories live in team projects (Azure DevOps), not under owners (GitHub).</param>
+/// <param name="WorkItems">Pull requests can be linked to work items.</param>
+/// <param name="VoteLevels">Votes beyond approve and reject: "with suggestions" and "waiting for author".</param>
+/// <param name="MergeStrategies">Merge types offered when completing, by their Azure DevOps names.</param>
+/// <param name="PrivateRepositories">New repositories can be made public or private.</param>
+public sealed record PullRequestFeatures(bool UsesProjects, bool WorkItems, bool VoteLevels, IReadOnlyList<string> MergeStrategies,
+    bool PrivateRepositories);
+
+/// <summary>Pull requests and repositories of one provider (Azure Repos or GitHub).</summary>
+public interface IPullRequestService : IDisposable
+{
+    /// <summary>The signed-in user's ID (Azure DevOps) or login name (GitHub), used for votes and "mine".</summary>
+    Task<string> GetMyIdAsync(CancellationToken ct = default);
+    /// <summary>Open pull requests, newest first; only in the given repositories when <paramref name="repositoryIds"/> is not empty.</summary>
+    Task<List<PullRequest>> GetActiveAsync(IEnumerable<string> projects, IReadOnlyCollection<string> repositoryIds, CancellationToken ct = default);
+    Task ApproveAsync(PullRequest pr, CancellationToken ct = default);
+    /// <param name="vote">10 approved, 5 approved with suggestions, 0 reset, -5 waiting for author, -10 rejected.</param>
+    /// <param name="comment">Sent with the vote; GitHub needs one to request changes.</param>
+    Task VoteAsync(PullRequest pr, int vote, string? comment = null, CancellationToken ct = default);
+    Task<List<PolicyCheck>> GetChecksAsync(PullRequest pr, CancellationToken ct = default);
+    Task<List<LinkedWorkItem>> GetLinkedWorkItemsAsync(PullRequest pr, CancellationToken ct = default);
+    Task<List<LinkedWorkItem>> SearchWorkItemsAsync(string project, string text, CancellationToken ct = default);
+    Task<(List<PullRequestFileChange> Files, string NewCommit, string BaseCommit)> GetChangesAsync(PullRequest pr, CancellationToken ct = default);
+    Task<string?> GetFileTextAsync(PullRequest pr, string path, string commit, CancellationToken ct = default);
+    Task<List<PullRequestComment>> GetCommentsAsync(PullRequest pr, CancellationToken ct = default);
+    Task AddCommentAsync(PullRequest pr, string text, string? filePath, int line, bool leftSide, CancellationToken ct = default);
+    Task CompleteAsync(PullRequest pr, PullRequestCompletion options, CancellationToken ct = default);
+    /// <param name="project">Azure DevOps: the team project. GitHub: ignored, every repository the user can reach is listed.</param>
+    Task<List<GitRepository>> GetRepositoriesAsync(string project, CancellationToken ct = default);
+    Task<List<string>> GetBranchesAsync(string project, string repositoryId, CancellationToken ct = default);
+    /// <returns>The new pull request's ID and web address.</returns>
+    Task<(int Id, string WebUrl)> CreateAsync(string project, GitRepository repository, string sourceBranch, string targetBranch,
+        string title, string description, bool isDraft, IReadOnlyCollection<string> workItemIds, CancellationToken ct = default);
+
+    // ---------- repository management ----------
+
+    /// <param name="project">Azure DevOps: the team project. GitHub: the owner; empty or the user's own login = a personal repository.</param>
+    Task<GitRepository> CreateRepositoryAsync(string project, string name, bool isPrivate, CancellationToken ct = default);
+    Task RenameRepositoryAsync(GitRepository repository, string newName, CancellationToken ct = default);
+    /// <summary>Azure DevOps moves the repository to its recycle bin; GitHub deletes it for good.</summary>
+    Task DeleteRepositoryAsync(GitRepository repository, CancellationToken ct = default);
+    Task CreateBranchAsync(GitRepository repository, string name, string fromBranch, CancellationToken ct = default);
+    Task DeleteBranchAsync(GitRepository repository, string name, CancellationToken ct = default);
+}
+
+public static class PullRequestServices
+{
+    private static readonly PullRequestFeatures AzureFeatures =
+        new(true, true, true, new[] { "noFastForward", "squash", "rebase", "rebaseMerge" }, false);
+
+    private static readonly PullRequestFeatures GitHubFeatures =
+        new(false, false, false, new[] { "noFastForward", "squash", "rebase" }, true);
+
+    public static PullRequestFeatures Features(AppSettings settings) =>
+        settings.Provider == ProviderKind.GitHub ? GitHubFeatures : AzureFeatures;
+
+    public static IPullRequestService Create(AppSettings settings) =>
+        settings.Provider == ProviderKind.GitHub ? new GitHubPullRequestService(settings) : new PullRequestService(settings);
+}
+
 /// <summary>Azure Repos pull requests through the Azure DevOps REST API, with the same token as the work items.</summary>
-public sealed class PullRequestService : HttpProviderBase
+public sealed class PullRequestService : HttpProviderBase, IPullRequestService
 {
     private const string Api = "api-version=7.0";
     public const int VoteApproved = 10;
@@ -86,7 +161,8 @@ public sealed class PullRequestService : HttpProviderBase
     }
 
     /// <summary>Active (open) pull requests in the given projects, newest first.</summary>
-    public async Task<List<PullRequest>> GetActiveAsync(IEnumerable<string> projects, CancellationToken ct = default)
+    public async Task<List<PullRequest>> GetActiveAsync(IEnumerable<string> projects, IReadOnlyCollection<string> repositoryIds,
+        CancellationToken ct = default)
     {
         var me = await GetMyIdAsync(ct);
         var result = new List<PullRequest>();
@@ -97,6 +173,8 @@ public sealed class PullRequestService : HttpProviderBase
             foreach (var node in json["value"]?.AsArray() ?? new JsonArray())
                 if (node != null) result.Add(Parse(node, project, me));
         }
+        if (repositoryIds.Count > 0)
+            result.RemoveAll(p => !repositoryIds.Contains(p.RepositoryId, StringComparer.OrdinalIgnoreCase));
         return result.OrderByDescending(p => p.Created).ToList();
     }
 
@@ -131,15 +209,14 @@ public sealed class PullRequestService : HttpProviderBase
     private static string ShortBranch(string? reference) =>
         reference?.StartsWith("refs/heads/", StringComparison.Ordinal) == true ? reference["refs/heads/".Length..] : reference ?? "";
 
-    /// <summary>Records an "Approved" vote by the signed-in user (adding them as a reviewer if needed).</summary>
-    public Task ApproveAsync(PullRequest pr, CancellationToken ct = default) => VoteAsync(pr, VoteApproved, ct);
-
-    /// <param name="vote">10 approved, 5 approved with suggestions, 0 reset, -5 waiting for author, -10 rejected.</param>
-    public async Task VoteAsync(PullRequest pr, int vote, CancellationToken ct = default)
+    public async Task VoteAsync(PullRequest pr, int vote, string? comment = null, CancellationToken ct = default)
     {
         var me = await GetMyIdAsync(ct);
         await SendAsync(HttpMethod.Put, $"{PullRequestUrl(pr)}/reviewers/{me}?{Api}", new { vote }, "application/json", ct);
+        if (!string.IsNullOrWhiteSpace(comment)) await AddCommentAsync(pr, comment, null, 0, false, ct);
     }
+
+    public Task ApproveAsync(PullRequest pr, CancellationToken ct = default) => VoteAsync(pr, VoteApproved, null, ct);
 
     /// <summary>The branch policies evaluated for the pull request, as on its Overview page; not-applicable ones left out.</summary>
     public async Task<List<PolicyCheck>> GetChecksAsync(PullRequest pr, CancellationToken ct = default)
@@ -339,12 +416,103 @@ public sealed class PullRequestService : HttpProviderBase
     public async Task<List<GitRepository>> GetRepositoriesAsync(string project, CancellationToken ct = default)
     {
         var json = await SendAsync(HttpMethod.Get, $"{ProjectUrl(project)}/_apis/git/repositories?{Api}", null, "application/json", ct);
-        return (json["value"]?.AsArray() ?? new JsonArray())
-            .Where(r => r != null && r["isDisabled"]?.GetValue<bool>() != true)
-            .Select(r => new GitRepository(r!["id"]!.ToString(), r["name"]?.ToString() ?? "", ShortBranch(r["defaultBranch"]?.ToString())))
+        var nodes = (json["value"]?.AsArray() ?? new JsonArray())
+            .Where(r => r != null && r["isDisabled"]?.GetValue<bool>() != true).Select(r => r!).ToList();
+
+        // Permissions are checked per repository, on the token "repoV2/{project ID}/{repository ID}".
+        var tokens = nodes.Select(r => $"repoV2/{r["project"]?["id"]}/{r["id"]}").ToList();
+        var canDelete = await HasGitPermissionAsync(tokens, GitDeleteRepository, ct);
+        var canRename = await HasGitPermissionAsync(tokens, GitRenameRepository, ct);
+        return nodes
+            .Select((r, i) => ParseRepository(r, project) with { CanDelete = canDelete[i], CanRename = canRename[i] })
             .OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
+
+    // The "Git Repositories" security namespace and its permission bits.
+    private const string GitSecurityNamespace = "2e9eb7ed-3c0a-47d4-87c1-0ffdd275fd87";
+    private const int GitDeleteRepository = 512;
+    private const int GitRenameRepository = 1024;
+
+    /// <summary>
+    /// Whether the signed-in user has a Git permission on each token. When the check itself fails (for
+    /// example a token without access to the security API), everything counts as allowed and the
+    /// server has the last word when the action is tried.
+    /// </summary>
+    private async Task<bool[]> HasGitPermissionAsync(IReadOnlyList<string> tokens, int permission, CancellationToken ct)
+    {
+        var result = Enumerable.Repeat(true, tokens.Count).ToArray();
+        try
+        {
+            // Many tokens fit in one call; batches keep the address short.
+            for (var start = 0; start < tokens.Count; start += 40)
+            {
+                var batch = tokens.Skip(start).Take(40).ToList();
+                var url = $"{_org}/_apis/permissions/{GitSecurityNamespace}/{permission}?tokens={Uri.EscapeDataString(string.Join(",", batch))}" +
+                          $"&delimiter=,&alwaysAllowAdministrators=false&{Api}";
+                var answers = (await SendAsync(HttpMethod.Get, url, null, "application/json", ct))["value"]?.AsArray();
+                for (var i = 0; i < batch.Count && answers != null && i < answers.Count; i++)
+                    result[start + i] = answers[i]?.GetValue<bool>() ?? true;
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            // Not known: leave the actions available.
+        }
+        return result;
+    }
+
+    private static GitRepository ParseRepository(JsonNode r, string project) =>
+        new(r["id"]!.ToString(), r["name"]?.ToString() ?? "", ShortBranch(r["defaultBranch"]?.ToString()),
+            r["project"]?["name"]?.ToString() ?? project, "", r["webUrl"]?.ToString() ?? "");
+
+    private string RepositoryUrl(GitRepository repository) =>
+        $"{ProjectUrl(repository.Project)}/_apis/git/repositories/{repository.Id}";
+
+    public async Task<GitRepository> CreateRepositoryAsync(string project, string name, bool isPrivate, CancellationToken ct = default)
+    {
+        // Azure DevOps repositories are always private to the organization; isPrivate does not apply.
+        var info = await SendAsync(HttpMethod.Get, $"{_org}/_apis/projects/{Uri.EscapeDataString(project)}?{Api}", null, "application/json", ct);
+        var body = new { name, project = new { id = info["id"]!.ToString() } };
+        var created = await SendAsync(HttpMethod.Post, $"{ProjectUrl(project)}/_apis/git/repositories?{Api}", body, "application/json", ct);
+        return ParseRepository(created, project);
+    }
+
+    public async Task RenameRepositoryAsync(GitRepository repository, string newName, CancellationToken ct = default) =>
+        await SendAsync(HttpMethod.Patch, $"{RepositoryUrl(repository)}?{Api}", new { name = newName }, "application/json", ct);
+
+    public async Task DeleteRepositoryAsync(GitRepository repository, CancellationToken ct = default) =>
+        await SendAsync(HttpMethod.Delete, $"{RepositoryUrl(repository)}?{Api}", null, "application/json", ct);
+
+    private const string NoCommit = "0000000000000000000000000000000000000000";
+
+    /// <summary>The commit a branch points to.</summary>
+    private async Task<string> BranchCommitAsync(GitRepository repository, string branch, CancellationToken ct)
+    {
+        var url = $"{RepositoryUrl(repository)}/refs?filter={Uri.EscapeDataString("heads/" + branch)}&{Api}";
+        var json = await SendAsync(HttpMethod.Get, url, null, "application/json", ct);
+        // The filter matches by prefix, so "main" would also find "main-old".
+        return (json["value"]?.AsArray() ?? new JsonArray())
+                   .FirstOrDefault(r => r?["name"]?.ToString() == "refs/heads/" + branch)?["objectId"]?.ToString()
+               ?? throw new InvalidOperationException($"The branch \"{branch}\" was not found.");
+    }
+
+    /// <summary>Creates, moves or deletes a branch: a zero commit on one side means "does not exist".</summary>
+    private async Task UpdateBranchAsync(GitRepository repository, string branch, string oldCommit, string newCommit, CancellationToken ct)
+    {
+        var body = new[] { new { name = "refs/heads/" + branch, oldObjectId = oldCommit, newObjectId = newCommit } };
+        var result = await SendAsync(HttpMethod.Post, $"{RepositoryUrl(repository)}/refs?{Api}", body, "application/json", ct);
+        var update = result["value"]?.AsArray().FirstOrDefault();
+        if (update?["success"]?.GetValue<bool>() != true)
+            throw new InvalidOperationException($"Azure DevOps refused the change to \"{branch}\": " +
+                                                (update?["customMessage"]?.ToString() ?? update?["updateStatus"]?.ToString() ?? "unknown reason"));
+    }
+
+    public async Task CreateBranchAsync(GitRepository repository, string name, string fromBranch, CancellationToken ct = default) =>
+        await UpdateBranchAsync(repository, name, NoCommit, await BranchCommitAsync(repository, fromBranch, ct), ct);
+
+    public async Task DeleteBranchAsync(GitRepository repository, string name, CancellationToken ct = default) =>
+        await UpdateBranchAsync(repository, name, await BranchCommitAsync(repository, name, ct), NoCommit, ct);
 
     public async Task<List<string>> GetBranchesAsync(string project, string repositoryId, CancellationToken ct = default)
     {

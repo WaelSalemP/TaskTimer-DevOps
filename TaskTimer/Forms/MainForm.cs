@@ -1,5 +1,6 @@
 using TaskTimer.Models;
 using TaskTimer.Services;
+using PowerState = TaskTimer.Services.PowerState;
 
 namespace TaskTimer.Forms;
 
@@ -109,6 +110,7 @@ public sealed class MainForm : Form
     private readonly Button _langButton = NewToolButton();
     private readonly Button _themeButton = NewToolButton();
     private readonly Button _pullRequestsButton = NewToolButton();
+    private readonly Button _repositoriesButton = NewToolButton();
     private readonly Label _transparencyLabel = NewFilterLabel();
     // Capped at 70% so the window can never become invisible.
     private readonly TrackBar _transparencyBar = new()
@@ -158,12 +160,13 @@ public sealed class MainForm : Form
         ClientSize = new Size(1400, 620);
         MinimumSize = new Size(760, 460);
         StartPosition = FormStartPosition.CenterScreen;
+        WindowState = FormWindowState.Maximized;
 
         ApplyTheme();
 
         _actionsFlow.Controls.AddRange(new Control[]
         {
-            _accountLabel, _accountCombo, _syncButton, _settingsButton, _teamButton, _pullRequestsButton, _langButton, _themeButton, _transparencyLabel, _transparencyBar
+            _accountLabel, _accountCombo, _syncButton, _settingsButton, _teamButton, _pullRequestsButton, _repositoriesButton, _langButton, _themeButton, _transparencyLabel, _transparencyBar
         });
         _transparencyBar.Value = Math.Clamp(_settings.WindowTransparency, _transparencyBar.Minimum, _transparencyBar.Maximum);
         Opacity = 1 - _transparencyBar.Value / 100.0;
@@ -243,6 +246,7 @@ public sealed class MainForm : Form
         _themeButton.Click += (_, _) => ToggleTheme();
         _accountCombo.SelectedIndexChanged += async (_, _) => await OnAccountChosenAsync();
         _pullRequestsButton.Click += (_, _) => OpenPullRequests();
+        _repositoriesButton.Click += (_, _) => OpenRepositories();
         _teamButton.Click += async (_, _) =>
         {
             using var form = new TeamAccountsForm(_settings);
@@ -275,8 +279,7 @@ public sealed class MainForm : Form
         };
         _machineCombo.SelectedIndexChanged += (_, _) =>
         {
-            UpdateMachineButtons();
-            _ = RefreshMachineStatusAsync();
+            _ = RefreshMachineStatusAsync(); // also resets the buttons until the new machine's state is known
             if (_machineCombo.SelectedItem is not DevMachine machine || _settings.SelectedMachineId == machine.Id) return;
             _settings.SelectedMachineId = machine.Id;
             SettingsStore.Save(_settings);
@@ -406,6 +409,7 @@ public sealed class MainForm : Form
         Theme.StyleButton(_langButton, Theme.Neutral);
         Theme.StyleButton(_themeButton, Theme.Neutral);
         Theme.StyleButton(_pullRequestsButton, Theme.Neutral);
+        Theme.StyleButton(_repositoriesButton, Theme.Neutral);
         Theme.StyleButton(_startButton, Theme.Green);
         Theme.StyleButton(_stopButton, Theme.Coral);
         Theme.StyleButton(_callButton, Theme.Violet);
@@ -450,6 +454,7 @@ public sealed class MainForm : Form
         _accountLabel.Text = Loc.T("Account");
         RebuildAccounts();
         _pullRequestsButton.Text = Loc.T("PullRequests");
+        _repositoriesButton.Text = Loc.T("Repositories");
         _themeButton.Text = Loc.T(Theme.IsDark ? "ThemeLight" : "ThemeDark");
         _transparencyLabel.Text = Loc.T("Transparency");
         _filtersGroup.Text = Loc.T("GroupFilters");
@@ -1003,8 +1008,11 @@ public sealed class MainForm : Form
 
         _idlePausedTasks.Clear();
         StopTask(key);
-        if (_activeTask?.Key == key && TaskRunning) _activeTask = _running.Values.Last().Item;
+        if (_activeTask?.Key == key) _activeTask = TaskRunning ? _running.Values.Last().Item : null;
         RememberLastTask(_settings.LastTaskKey, running: TaskRunning);
+        // Once the time is recorded the stopped task is no longer selected, so it cannot be restarted by accident.
+        _grid.ClearSelection();
+        _grid.CurrentCell = null;
         UpdateUi();
     }
 
@@ -1114,14 +1122,20 @@ public sealed class MainForm : Form
         _machineCombo.SelectedItem = _settings.DevMachines.FirstOrDefault(m => m.Id == _settings.SelectedMachineId)
                                      ?? _machineCombo.Items.Cast<DevMachine>().FirstOrDefault();
         // The selection may not have changed (same machine, edited details), so refresh explicitly.
-        UpdateMachineButtons();
         _ = RefreshMachineStatusAsync();
     }
+
+    /// <summary>Power state of the selected machine; null while it is not known.</summary>
+    private PowerState? _machineState;
+
+    /// <summary>A machine that is starting or stopping is checked again after this long, until it settles.</summary>
+    private const int BusyRecheckSeconds = 20;
 
     private void UpdateMachineButtons()
     {
         var machine = _machineCombo.SelectedItem as DevMachine;
-        _startMachineButton.Enabled = _stopMachineButton.Enabled = machine != null && MachinePower.IsManaged(machine);
+        (_startMachineButton.Enabled, _stopMachineButton.Enabled, _connectButton.Enabled) =
+            MachinesForm.PowerButtons(machine, _machineState);
         _stopMachineButton.Text = Loc.T(machine?.Location == MachineLocation.OnPremises ? "SaveMachine" : "StopMachine");
     }
 
@@ -1129,20 +1143,30 @@ public sealed class MainForm : Form
     private async Task RefreshMachineStatusAsync(bool interactive = false)
     {
         var version = ++_machineStatusVersion;
+        _machineState = null;
+        UpdateMachineButtons();
         if (_machineCombo.SelectedItem is not DevMachine machine || !MachinePower.IsManaged(machine))
         {
             _machineStatusLabel.Text = _machineCombo.SelectedItem is DevMachine ? Loc.T("PowerNotManaged") : "";
             return;
         }
         _machineStatusLabel.Text = Loc.T("PowerChecking");
-        var text = await MachinesForm.StatusTextAsync(machine, interactive, "PowerSignInMain");
-        if (version == _machineStatusVersion && !IsDisposed) _machineStatusLabel.Text = text;
+        var (state, text) = await MachinesForm.StatusAsync(machine, interactive, "PowerSignInMain");
+        if (version != _machineStatusVersion || IsDisposed) return;
+        _machineState = state;
+        _machineStatusLabel.Text = text;
+        UpdateMachineButtons();
+
+        // Starting or stopping takes a few minutes; look again so the buttons follow without a click.
+        if (state != PowerState.Busy) return;
+        await Task.Delay(TimeSpan.FromSeconds(BusyRecheckSeconds));
+        if (version == _machineStatusVersion && !IsDisposed) await RefreshMachineStatusAsync();
     }
 
     private async Task ChangeMachinePowerAsync(bool start)
     {
         if (_machineCombo.SelectedItem is not DevMachine machine) return;
-        _startMachineButton.Enabled = _stopMachineButton.Enabled = false;
+        _startMachineButton.Enabled = _stopMachineButton.Enabled = _connectButton.Enabled = false;
         _machineStatusLabel.Text = Loc.T(start ? "PowerStarting" : machine.Location == MachineLocation.Cloud ? "PowerStopping" : "PowerSaving");
         try
         {
@@ -1150,11 +1174,7 @@ public sealed class MainForm : Form
         }
         finally
         {
-            if (!IsDisposed)
-            {
-                UpdateMachineButtons();
-                await RefreshMachineStatusAsync(interactive: true);
-            }
+            if (!IsDisposed) await RefreshMachineStatusAsync(interactive: true);
         }
     }
 
@@ -1264,17 +1284,34 @@ public sealed class MainForm : Form
 
     private void OpenPullRequests()
     {
-        if (!ServerTasksAvailable) { ShowMessage(Loc.T("PrNeedsDevOps")); return; }
-        // Look in the configured project, or else in every project the loaded tasks come from.
+        if (RepositoryProjects() is not { } projects) return;
+        var linkable = _items.Where(i => i.Key.StartsWith("ado:", StringComparison.Ordinal)).ToList();
+        using var form = new PullRequestsForm(_settings, projects, _grid.CurrentRow?.Tag as WorkItem, linkable);
+        ShowModal(form);
+    }
+
+    private void OpenRepositories()
+    {
+        if (RepositoryProjects() is not { } projects) return;
+        using var form = new RepositoriesForm(_settings, projects);
+        ShowModal(form);
+    }
+
+    /// <summary>
+    /// The Azure DevOps projects to look for repositories in: the configured project, or else every
+    /// project the loaded tasks come from. GitHub needs none (an empty list). Null, after telling the
+    /// user why, when repositories cannot be reached.
+    /// </summary>
+    private List<string>? RepositoryProjects()
+    {
+        if (!ProviderFactory.IsConfigured(_settings)) { ShowMessage(Loc.T("PrNeedsDevOps")); return null; }
+        if (_settings.Provider == ProviderKind.GitHub) return new List<string>();
         var projects = _settings.Project.Length > 0
             ? new List<string> { _settings.Project }
             : _items.Where(i => !LocalTaskStore.IsLocal(i)).Select(i => i.Project).Where(p => p.Length > 0)
                 .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(p => p).ToList();
-        if (projects.Count == 0) { ShowMessage(Loc.T("PrNoProjects"), MessageBoxIcon.Warning); return; }
-
-        var linkable = _items.Where(i => i.Key.StartsWith("ado:", StringComparison.Ordinal)).ToList();
-        using var form = new PullRequestsForm(_settings, projects, _grid.CurrentRow?.Tag as WorkItem, linkable);
-        ShowModal(form);
+        if (projects.Count == 0) { ShowMessage(Loc.T("PrNoProjects"), MessageBoxIcon.Warning); return null; }
+        return projects;
     }
 
     // ---------- add and edit tasks ----------
@@ -1722,7 +1759,7 @@ public sealed class MainForm : Form
     public void ShowFromTray()
     {
         Show();
-        if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+        if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Maximized;
         Activate();
     }
 

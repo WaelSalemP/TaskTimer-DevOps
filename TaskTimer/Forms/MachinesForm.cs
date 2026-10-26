@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using TaskTimer.Models;
 using TaskTimer.Services;
+using PowerState = TaskTimer.Services.PowerState;
 
 namespace TaskTimer.Forms;
 
@@ -38,7 +39,7 @@ public sealed class MachinesForm : Form
         var add = NewButton("Add", Theme.Green);
         var edit = NewButton("MachineEdit", Theme.Neutral);
         var remove = NewButton("Remove", Theme.Neutral);
-        var connect = NewButton("Connect", Theme.Primary);
+        var connect = _connect = NewButton("Connect", Theme.Primary);
         var close = NewButton("MachineClose", Theme.Neutral);
         var refresh = NewButton("RefreshStatus", Theme.Neutral);
         _start = NewButton("StartMachine", Theme.Green);
@@ -52,7 +53,7 @@ public sealed class MachinesForm : Form
         edit.Click += (_, _) => { if (Selected is { } m) Edit(m); };
         remove.Click += (_, _) => Remove();
         connect.Click += (_, _) => { if (Selected is { } m) Connect(this, m); };
-        _grid.CellDoubleClick += (_, e) => { if (e.RowIndex >= 0 && Selected is { } m) Connect(this, m); };
+        _grid.CellDoubleClick += (_, e) => { if (e.RowIndex >= 0 && Selected is { } m && _connect.Enabled) Connect(this, m); };
 
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(8) };
         buttons.Controls.AddRange(new Control[] { add, edit, remove, connect, refresh, _start, _stop, close });
@@ -79,10 +80,14 @@ public sealed class MachinesForm : Form
     private void UpdatePowerButtons()
     {
         var machine = Selected;
-        var managed = machine != null && MachinePower.IsManaged(machine);
-        _start.Enabled = _stop.Enabled = managed;
+        var state = machine != null && _states.TryGetValue(machine.Id, out var known) ? known : null;
+        (_start.Enabled, _stop.Enabled, _connect.Enabled) = PowerButtons(machine, state);
         _stop.Text = Loc.T(machine?.Location == MachineLocation.OnPremises ? "SaveMachine" : "StopMachine");
     }
+
+    /// <summary>Last known power state by machine ID; missing or null while it is not known.</summary>
+    private readonly Dictionary<string, PowerState?> _states = new();
+    private readonly Button _connect;
 
     private DataGridViewRow? RowOf(DevMachine machine) =>
         _grid.Rows.Cast<DataGridViewRow>().FirstOrDefault(r => (r.Tag as DevMachine)?.Id == machine.Id);
@@ -100,36 +105,71 @@ public sealed class MachinesForm : Form
         var machines = _grid.Rows.Cast<DataGridViewRow>().Select(r => r.Tag).OfType<DevMachine>().ToList();
         foreach (var machine in machines)
             ShowStatus(machine, Loc.T(MachinePower.IsManaged(machine) ? "PowerChecking" : "PowerNotManaged"));
-        await Task.WhenAll(machines.Where(MachinePower.IsManaged).Select(async machine =>
-            ShowStatus(machine, await StatusTextAsync(machine, interactive))));
+        await Task.WhenAll(machines.Where(MachinePower.IsManaged).Select(RefreshStatusAsync));
+
+        async Task RefreshStatusAsync(DevMachine machine)
+        {
+            var (state, text) = await StatusAsync(machine, interactive);
+            if (IsDisposed) return;
+            _states[machine.Id] = state;
+            ShowStatus(machine, text);
+            if (Selected?.Id == machine.Id) UpdatePowerButtons();
+        }
     }
 
-    /// <summary>Status text for display. A failure is shown as "Error" with the first line of its message.</summary>
-    public static async Task<string> StatusTextAsync(DevMachine machine, bool interactive = false, string signInKey = "PowerSignInList")
+    /// <summary>
+    /// The power state and its text for display. A failure is shown as "Error" with the first line of its
+    /// message; the state is then null, as it is when the server reports a state the app does not know.
+    /// </summary>
+    public static async Task<(PowerState? State, string Text)> StatusAsync(DevMachine machine, bool interactive = false,
+        string signInKey = "PowerSignInList")
     {
         try
         {
             var status = await MachinePower.GetStatusAsync(machine, interactive);
-            return status.Key != null ? Loc.T(status.Key) : status.Raw.Length > 0 ? status.Raw : Loc.T("PowerUnknown");
+            var text = status.Key != null ? Loc.T(status.Key) : status.Raw.Length > 0 ? status.Raw : Loc.T("PowerUnknown");
+            return (status.State == PowerState.Unknown ? null : status.State, text);
         }
         catch (SignInRequiredException)
         {
-            return Loc.T(signInKey);
+            return (null, Loc.T(signInKey));
         }
         catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
         {
-            return Loc.T("PowerError") + ": " + ex.Message.Split('\n')[0].Trim();
+            return (null, Loc.T("PowerError") + ": " + ex.Message.Split('\n')[0].Trim());
         }
+    }
+
+    /// <summary>
+    /// Which of Start, Stop/Save and Connect make sense: a stopped or saved machine can only be started,
+    /// a running one stopped or connected to, and one that is starting or stopping waits. While the
+    /// state is not known (still checking, sign-in needed, error), everything stays available.
+    /// </summary>
+    public static (bool Start, bool Stop, bool Connect) PowerButtons(DevMachine? machine, PowerState? state)
+    {
+        if (machine == null) return (false, false, false);
+        // Without VM details the app cannot start or stop it, nor tell whether it is on.
+        if (!MachinePower.IsManaged(machine)) return (false, false, true);
+        return state switch
+        {
+            PowerState.Running => (false, true, true),
+            PowerState.Stopped => (true, false, false),
+            PowerState.Busy => (false, false, false),
+            _ => (true, true, true)
+        };
     }
 
     private async Task ChangePowerFromListAsync(bool start)
     {
         if (Selected is not { } machine) return;
-        _start.Enabled = _stop.Enabled = false;
+        _start.Enabled = _stop.Enabled = _connect.Enabled = false;
         ShowStatus(machine, Loc.T(start ? "PowerStarting" : machine.Location == MachineLocation.Cloud ? "PowerStopping" : "PowerSaving"));
         await ChangePowerAsync(this, machine, start);
-        ShowStatus(machine, await StatusTextAsync(machine, interactive: true));
-        if (!IsDisposed) UpdatePowerButtons();
+        var (state, text) = await StatusAsync(machine, interactive: true);
+        if (IsDisposed) return;
+        _states[machine.Id] = state;
+        ShowStatus(machine, text);
+        UpdatePowerButtons();
     }
 
     /// <summary>Starts, or stops/saves, a machine; asks first before deallocating a cloud VM. Reports errors itself.</summary>
@@ -158,6 +198,7 @@ public sealed class MachinesForm : Form
     private void Reload(DevMachine? select = null)
     {
         _grid.Rows.Clear();
+        _states.Clear(); // details may have changed; every status is read again below
         foreach (var machine in _settings.DevMachines.OrderBy(m => m.Name, StringComparer.CurrentCultureIgnoreCase))
         {
             var index = _grid.Rows.Add(machine.Name, Loc.T(machine.Location == MachineLocation.Cloud ? "Cloud" : "OnPremises"),
