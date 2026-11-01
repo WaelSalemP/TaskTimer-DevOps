@@ -36,7 +36,7 @@ public sealed class WorkItem
     public bool IsListed { get; set; } = true;
 
     // "Issue" is the only GitHub type, so it has to stay timeable.
-    private static readonly HashSet<string> TimeableTypes = new(StringComparer.OrdinalIgnoreCase) { "Task", "Bug", "Issue" };
+    private static readonly HashSet<string> TimeableTypes = new(StringComparer.OrdinalIgnoreCase) { "Task", "Bug", "Issue", "Ticket" };
 
     /// <summary>Time may be recorded on and sent to Tasks and Bugs only, not on stories, features or epics.</summary>
     [System.Text.Json.Serialization.JsonIgnore]
@@ -66,6 +66,7 @@ public sealed class ConnectionProfile
     public string SelectedState { get; set; } = "";
     public string SelectedCustomer { get; set; } = "";
     public string SelectedAssignee { get; set; } = "";
+    public List<string> PullRequestRepositories { get; set; } = new();
 
     public override string ToString() => Name;
 }
@@ -174,6 +175,10 @@ public sealed class AppSettings
     public List<DevMachine> DevMachines { get; set; } = new();
     public string SelectedMachineId { get; set; } = "";
     public string Language { get; set; } = "en";
+    /// <summary>Dynamics 365 address for tickets, e.g. https://yourorg.crm4.dynamics.com. One CRM for the whole app.</summary>
+    public string CrmUrl { get; set; } = "";
+    /// <summary>User name for the CRM. The password is not kept; see <see cref="Services.CrmAuth"/>.</summary>
+    public string CrmUserName { get; set; } = "";
     /// <summary>All saved accounts; the fields above and below hold the active one's values.</summary>
     public List<ConnectionProfile> Connections { get; set; } = new();
     public string ActiveConnectionId { get; set; } = "";
@@ -221,6 +226,7 @@ public sealed class AppSettings
         p.SelectedState = SelectedState;
         p.SelectedCustomer = SelectedCustomer;
         p.SelectedAssignee = SelectedAssignee;
+        p.PullRequestRepositories = new List<string>(PullRequestRepositories);
     }
 
     /// <summary>Makes a saved account the active one by copying its values into the top-level fields.</summary>
@@ -240,12 +246,18 @@ public sealed class AppSettings
         SelectedState = p.SelectedState;
         SelectedCustomer = p.SelectedCustomer;
         SelectedAssignee = p.SelectedAssignee;
+        PullRequestRepositories = new List<string>(p.PullRequestRepositories);
     }
     /// <summary>Sprint filter on the main form. Empty = all sprints.</summary>
     public string SelectedSprint { get; set; } = "";
     public string SelectedState { get; set; } = "";
     public string SelectedCustomer { get; set; } = "";
     public string SelectedAssignee { get; set; } = "";
+    /// <summary>
+    /// Repositories the Pull requests window shows, by <see cref="Services.GitRepository.Id"/>. Empty = all
+    /// (Azure DevOps: every repository of the projects; GitHub: the pull requests the user takes part in).
+    /// </summary>
+    public List<string> PullRequestRepositories { get; set; } = new();
     /// <summary>
     /// Azure DevOps only. When set, items assigned to any member of this team are loaded as well
     /// as my own. A plain team name is resolved inside <see cref="Project"/>.

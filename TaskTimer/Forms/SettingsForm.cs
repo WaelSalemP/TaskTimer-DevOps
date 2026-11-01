@@ -27,7 +27,14 @@ public sealed class SettingsForm : Form
     private readonly Button _browse = new() { AutoSize = true, Dock = DockStyle.Right };
     private readonly Label _deliveryFieldLabel = NewLabel();
     private readonly TextBox _deliveryField = new() { Dock = DockStyle.Fill, PlaceholderText = "Delivery Date / Microsoft.VSTS.Scheduling.TargetDate" };
+    private readonly Label _patLabel = NewLabel();
     private readonly TextBox _pat = new() { Dock = DockStyle.Fill, UseSystemPasswordChar = true };
+    // GitHub signs in through the browser instead of a pasted token.
+    private readonly FlowLayoutPanel _gitHubPanel = new() { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+    private readonly Button _gitHubSignIn = new() { AutoSize = true, Padding = new Padding(8, 3, 8, 3) };
+    private readonly Label _gitHubStatus = new() { AutoSize = true, Margin = new Padding(8, 8, 3, 3) };
+    /// <summary>The GitHub access token from the browser sign-in, kept apart from an Azure DevOps token.</summary>
+    private string _gitHubToken = "";
     private readonly CheckBox _autoDetect = new() { AutoSize = true };
     private readonly CheckBox _autoResume = new() { AutoSize = true };
     private readonly CheckBox _allowMultiple = new() { AutoSize = true };
@@ -89,7 +96,14 @@ public sealed class SettingsForm : Form
         workPathsPanel.Controls.Add(_browse);
         AddRow(table, NewLabel(Loc.T("WorkPaths")), workPathsPanel);
         _browse.Click += (_, _) => BrowseWorkPath();
-        AddRow(table, NewLabel(Loc.T("Pat")), _pat);
+        Theme.StyleButton(_gitHubSignIn, Theme.Primary);
+        _gitHubStatus.ForeColor = Theme.Muted;
+        _gitHubPanel.Controls.AddRange(new Control[] { _gitHubSignIn, _gitHubStatus });
+        _gitHubSignIn.Click += async (_, _) => await SignInToGitHubAsync();
+        var credentialPanel = new Panel { Dock = DockStyle.Fill, Height = _gitHubSignIn.PreferredSize.Height + 8, Margin = new Padding(3) };
+        credentialPanel.Controls.Add(_pat);
+        credentialPanel.Controls.Add(_gitHubPanel);
+        AddRow(table, _patLabel, credentialPanel);
         foreach (var check in new[] { _autoDetect, _autoResume, _allowMultiple, _reduceRemaining, _addComment })
         {
             table.Controls.Add(check);
@@ -132,7 +146,8 @@ public sealed class SettingsForm : Form
         _workPaths.Text = settings.WorkPaths;
         _idleSeconds.Value = Math.Clamp(settings.IdlePauseSeconds, 0, (int)_idleSeconds.Maximum);
         _minCallMinutes.Value = Math.Clamp(settings.MinCallMinutes, 0, (int)_minCallMinutes.Maximum);
-        _pat.Text = SettingsStore.GetPat(settings);
+        if (settings.Provider == ProviderKind.GitHub) _gitHubToken = SettingsStore.GetPat(settings);
+        else _pat.Text = SettingsStore.GetPat(settings);
         _autoDetect.Checked = settings.AutoDetectTeams;
         _autoResume.Checked = settings.AutoResumeLastTask;
         _allowMultiple.Checked = settings.AllowMultipleTasks;
@@ -173,14 +188,44 @@ public sealed class SettingsForm : Form
         _deliveryFieldLabel.Enabled = _deliveryField.Enabled = !IsGitHub;
         _teamLabel.Enabled = _team.Enabled = !IsGitHub;
         _reduceRemaining.Enabled = _addComment.Enabled = !IsGitHub;
+        _patLabel.Text = Loc.T(IsGitHub ? "GitHubAccount" : "Pat");
+        _pat.Visible = !IsGitHub;
+        _gitHubPanel.Visible = IsGitHub;
+        UpdateGitHubStatus();
     }
+
+    private void UpdateGitHubStatus(string login = "")
+    {
+        _gitHubSignIn.Text = Loc.T(_gitHubToken.Length == 0 ? "GitHubSignIn" : "GitHubSignInAgain");
+        _gitHubStatus.Text = _gitHubToken.Length == 0 ? Loc.T("GitHubNotSignedIn")
+            : login.Length > 0 ? Loc.T("GitHubSignedInAs", login)
+            : Loc.T("GitHubSignedIn");
+    }
+
+    private async Task SignInToGitHubAsync()
+    {
+        using var form = new GitHubSignInForm(_url.Text);
+        if (form.ShowDialog(this) != DialogResult.OK) return;
+        _gitHubToken = form.Token;
+        UpdateGitHubStatus();
+        try
+        {
+            UpdateGitHubStatus(await GitHubAuth.GetLoginAsync(_url.Text, _gitHubToken));
+        }
+        catch (HttpRequestException)
+        {
+            // Signed in all the same; the name is only for display.
+        }
+    }
+
+    private string Credential => IsGitHub ? _gitHubToken : _pat.Text.Trim();
 
     private bool TryRead(AppSettings target)
     {
-        if (_pat.Text.Trim().Length == 0 || (!IsGitHub && _url.Text.Trim().Length == 0))
+        if (Credential.Length == 0 || (!IsGitHub && _url.Text.Trim().Length == 0))
         {
-            MessageBox.Show(this, Loc.T("Required"), Text, MessageBoxButtons.OK, MessageBoxIcon.Warning,
-                MessageBoxDefaultButton.Button1, Loc.MsgOptions);
+            MessageBox.Show(this, Loc.T(IsGitHub ? "GitHubRequired" : "Required"), Text, MessageBoxButtons.OK,
+                MessageBoxIcon.Warning, MessageBoxDefaultButton.Button1, Loc.MsgOptions);
             return false;
         }
 
@@ -194,7 +239,7 @@ public sealed class SettingsForm : Form
         target.WorkPaths = _workPaths.Text.Trim();
         target.IdlePauseSeconds = (int)_idleSeconds.Value;
         target.MinCallMinutes = (int)_minCallMinutes.Value;
-        SettingsStore.SetPat(target, _pat.Text.Trim());
+        SettingsStore.SetPat(target, Credential);
         target.AutoDetectTeams = _autoDetect.Checked;
         target.AutoResumeLastTask = _autoResume.Checked;
         target.AllowMultipleTasks = _allowMultiple.Checked;

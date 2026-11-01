@@ -45,6 +45,7 @@ public sealed class PullRequestReviewForm : Form
     private static ViewMode _lastView = ViewMode.Inline;
     private readonly ComboBox _view = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 240, Margin = new Padding(3, 4, 3, 3) };
     private ViewMode? _columnsFor;
+    private readonly bool _voteLevels;
 
     /// <param name="approveBlockedReason">When set, required checks have failed: approving is not offered and this says why.</param>
     public PullRequestReviewForm(AppSettings settings, PullRequest pr, string? approveBlockedReason = null)
@@ -105,6 +106,12 @@ public sealed class PullRequestReviewForm : Form
         var reject = NewButton("PrVoteRejected", Theme.Coral);
         var browser = NewButton("OpenInBrowser", Theme.Neutral);
         var workItems = NewButton("PrWorkItems", Theme.Neutral);
+        // GitHub reviews only approve or request changes, and pull requests have no linked work items.
+        var features = PullRequestServices.Features(settings);
+        _voteLevels = features.VoteLevels;
+        suggestions.Visible = wait.Visible = features.VoteLevels;
+        workItems.Visible = features.WorkItems;
+        if (!features.VoteLevels) reject.Text = Loc.T("PrRequestChanges");
         workItems.Click += (_, _) => LinkedWorkItemsForm.Show(this, settings, pr);
         var close = NewButton("MachineClose", Theme.Neutral);
         close.DialogResult = DialogResult.OK;
@@ -143,7 +150,7 @@ public sealed class PullRequestReviewForm : Form
         10 => Loc.T("PrVoteApproved"),
         5 => Loc.T("PrVoteSuggestions"),
         -5 => Loc.T("PrVoteWaiting"),
-        -10 => Loc.T("PrVoteRejected"),
+        -10 => Loc.T(_voteLevels ? "PrVoteRejected" : "PrChangesRequested"),
         _ => Loc.T("PrVoteNone")
     };
 
@@ -155,7 +162,7 @@ public sealed class PullRequestReviewForm : Form
         UseWaitCursor = true;
         try
         {
-            using var service = new PullRequestService(_settings);
+            using var service = PullRequestServices.Create(_settings);
             var (files, newCommit, baseCommit) = await service.GetChangesAsync(_pr);
             _newCommit = newCommit;
             _baseCommit = baseCommit;
@@ -201,7 +208,7 @@ public sealed class PullRequestReviewForm : Form
             AddMessageRow(Loc.T("PrLoading"));
             try
             {
-                using var service = new PullRequestService(_settings);
+                using var service = PullRequestServices.Create(_settings);
                 var newText = file.IsDelete ? "" : await service.GetFileTextAsync(_pr, file.Path, _newCommit);
                 var oldText = file.IsAdd ? "" : await service.GetFileTextAsync(_pr, file.OriginalPath, _baseCommit);
                 if (version != _loadVersion || IsDisposed) return;
@@ -479,7 +486,7 @@ public sealed class PullRequestReviewForm : Form
         if (string.IsNullOrWhiteSpace(text)) return;
         try
         {
-            using var service = new PullRequestService(_settings);
+            using var service = PullRequestServices.Create(_settings);
             await service.AddCommentAsync(_pr, text.Trim(), filePath, line, leftSide);
             _comments = await service.GetCommentsAsync(_pr);
             _files.Refresh();
@@ -505,10 +512,17 @@ public sealed class PullRequestReviewForm : Form
 
     private async Task VoteAsync(int vote)
     {
+        // GitHub requires a comment saying what has to change.
+        string? comment = null;
+        if (vote < 0 && !_voteLevels)
+        {
+            comment = CommentPrompt.Ask(this, Loc.T("PrRequestChanges"));
+            if (string.IsNullOrWhiteSpace(comment)) return;
+        }
         try
         {
-            using var service = new PullRequestService(_settings);
-            await service.VoteAsync(_pr, vote);
+            using var service = PullRequestServices.Create(_settings);
+            await service.VoteAsync(_pr, vote, comment?.Trim());
             UpdateVoteLabel(vote);
         }
         catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or TaskCanceledException)

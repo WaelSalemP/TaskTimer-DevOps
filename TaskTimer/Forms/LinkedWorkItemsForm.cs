@@ -58,7 +58,7 @@ public sealed class LinkedWorkItemsForm : Form
         AddMessage(Loc.T("PrLoading"));
         try
         {
-            using var service = new PullRequestService(settings);
+            using var service = PullRequestServices.Create(settings);
             var items = await service.GetLinkedWorkItemsAsync(pr);
             if (IsDisposed) return;
             _grid.Rows.Clear();
