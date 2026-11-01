@@ -36,7 +36,7 @@ public sealed class WorkItem
     public bool IsListed { get; set; } = true;
 
     // "Issue" is the only GitHub type, so it has to stay timeable.
-    private static readonly HashSet<string> TimeableTypes = new(StringComparer.OrdinalIgnoreCase) { "Task", "Bug", "Issue" };
+    private static readonly HashSet<string> TimeableTypes = new(StringComparer.OrdinalIgnoreCase) { "Task", "Bug", "Issue", "Ticket" };
 
     /// <summary>Time may be recorded on and sent to Tasks and Bugs only, not on stories, features or epics.</summary>
     [System.Text.Json.Serialization.JsonIgnore]
@@ -175,6 +175,10 @@ public sealed class AppSettings
     public List<DevMachine> DevMachines { get; set; } = new();
     public string SelectedMachineId { get; set; } = "";
     public string Language { get; set; } = "en";
+    /// <summary>Dynamics 365 address for tickets, e.g. https://yourorg.crm4.dynamics.com. One CRM for the whole app.</summary>
+    public string CrmUrl { get; set; } = "";
+    /// <summary>User name for the CRM. The password is not kept; see <see cref="Services.CrmAuth"/>.</summary>
+    public string CrmUserName { get; set; } = "";
     /// <summary>All saved accounts; the fields above and below hold the active one's values.</summary>
     public List<ConnectionProfile> Connections { get; set; } = new();
     public string ActiveConnectionId { get; set; } = "";

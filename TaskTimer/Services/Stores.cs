@@ -113,7 +113,9 @@ public sealed class TimeLog
     /// <summary>The account whose time is shown and sent; set by the main window.</summary>
     public static string ActiveConnection { get; set; } = "";
 
-    private static bool IsLocalKey(string key) => key.StartsWith("local:", StringComparison.Ordinal);
+    // Local tasks and CRM tickets stay in the list whichever account is active.
+    private static bool IsLocalKey(string key) =>
+        key.StartsWith("local:", StringComparison.Ordinal) || key.StartsWith(TicketStore.KeyPrefix, StringComparison.Ordinal);
 
     private static bool InActiveAccount(TimeEntry e) => IsLocalKey(e.Key) || e.ConnectionId == ActiveConnection;
 

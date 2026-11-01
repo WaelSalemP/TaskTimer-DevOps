@@ -50,6 +50,9 @@ public abstract class HttpProviderBase : IDisposable
 {
     protected readonly HttpClient Http = RetryHandler.CreateClient(TimeSpan.FromSeconds(30));
 
+    /// <summary>Lets a provider add headers that depend on the single request.</summary>
+    protected virtual void Prepare(HttpRequestMessage request) { }
+
     protected async Task<JsonNode> SendAsync(HttpMethod method, string url, object? body, string contentType,
         CancellationToken ct)
     {
@@ -60,6 +63,7 @@ public abstract class HttpProviderBase : IDisposable
             request.Content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
         }
 
+        Prepare(request);
         using var response = await Http.SendAsync(request, ct);
         var text = await response.Content.ReadAsStringAsync(ct);
 
@@ -74,7 +78,8 @@ public abstract class HttpProviderBase : IDisposable
             try
             {
                 var error = JsonNode.Parse(text);
-                message = error?["message"]?.ToString();
+                // Dynamics 365 nests the message: {"error":{"message":...}}.
+                message = error?["message"]?.ToString() ?? (error?["error"] as JsonObject)?["message"]?.ToString();
                 // GitHub explains a "Validation Failed" in a list of errors.
                 var details = error?["errors"]?.AsArray()
                     .Select(e => e is JsonObject o ? o["message"]?.ToString() ?? o["code"]?.ToString() : e?.ToString())

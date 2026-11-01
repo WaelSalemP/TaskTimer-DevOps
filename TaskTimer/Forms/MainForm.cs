@@ -37,6 +37,7 @@ public sealed class MainForm : Form
     private readonly AppSettings _settings = SettingsStore.Load();
     private readonly TimeLog _log = TimeLog.Load();
     private readonly LocalTaskStore _localTasks = LocalTaskStore.Load();
+    private readonly TicketStore _tickets = TicketStore.Load();
     private readonly WorkdayTracker _workday = WorkdayTracker.Load();
     private readonly SessionMonitor _session = new();
     private WorkFileWatcher? _fileWatcher;
@@ -111,6 +112,7 @@ public sealed class MainForm : Form
     private readonly Button _themeButton = NewToolButton();
     private readonly Button _pullRequestsButton = NewToolButton();
     private readonly Button _repositoriesButton = NewToolButton();
+    private readonly Button _ticketsButton = NewToolButton();
     private readonly Label _transparencyLabel = NewFilterLabel();
     // Capped at 70% so the window can never become invisible.
     private readonly TrackBar _transparencyBar = new()
@@ -166,7 +168,7 @@ public sealed class MainForm : Form
 
         _actionsFlow.Controls.AddRange(new Control[]
         {
-            _accountLabel, _accountCombo, _syncButton, _settingsButton, _teamButton, _pullRequestsButton, _repositoriesButton, _langButton, _themeButton, _transparencyLabel, _transparencyBar
+            _accountLabel, _accountCombo, _syncButton, _settingsButton, _teamButton, _pullRequestsButton, _repositoriesButton, _ticketsButton, _langButton, _themeButton, _transparencyLabel, _transparencyBar
         });
         _transparencyBar.Value = Math.Clamp(_settings.WindowTransparency, _transparencyBar.Minimum, _transparencyBar.Maximum);
         Opacity = 1 - _transparencyBar.Value / 100.0;
@@ -247,6 +249,7 @@ public sealed class MainForm : Form
         _accountCombo.SelectedIndexChanged += async (_, _) => await OnAccountChosenAsync();
         _pullRequestsButton.Click += (_, _) => OpenPullRequests();
         _repositoriesButton.Click += (_, _) => OpenRepositories();
+        _ticketsButton.Click += (_, _) => OpenTickets();
         _teamButton.Click += async (_, _) =>
         {
             using var form = new TeamAccountsForm(_settings);
@@ -410,6 +413,7 @@ public sealed class MainForm : Form
         Theme.StyleButton(_themeButton, Theme.Neutral);
         Theme.StyleButton(_pullRequestsButton, Theme.Neutral);
         Theme.StyleButton(_repositoriesButton, Theme.Neutral);
+        Theme.StyleButton(_ticketsButton, Theme.Neutral);
         Theme.StyleButton(_startButton, Theme.Green);
         Theme.StyleButton(_stopButton, Theme.Coral);
         Theme.StyleButton(_callButton, Theme.Violet);
@@ -455,6 +459,7 @@ public sealed class MainForm : Form
         RebuildAccounts();
         _pullRequestsButton.Text = Loc.T("PullRequests");
         _repositoriesButton.Text = Loc.T("Repositories");
+        _ticketsButton.Text = Loc.T("Tickets");
         _themeButton.Text = Loc.T(Theme.IsDark ? "ThemeLight" : "ThemeDark");
         _transparencyLabel.Text = Loc.T("Transparency");
         _filtersGroup.Text = Loc.T("GroupFilters");
@@ -673,7 +678,7 @@ public sealed class MainForm : Form
         var visible = new HashSet<string>();
         foreach (var item in MyItems.Where(i =>
                      // Local tasks have no sprint and are always the user's own, so those two filters skip them.
-                     (LocalTaskStore.IsLocal(i) || Matches(sprint, i.Sprint) && Matches(assignee, i.AssignedTo)) &&
+                     (IsOffAccount(i) || Matches(sprint, i.Sprint) && Matches(assignee, i.AssignedTo)) &&
                      Matches(state, i.State) && Matches(customer, i.Customer) && Found(i)))
             for (var node = item; node != null && visible.Add(node.Key);)
                 node = byKey.GetValueOrDefault(node.ParentKey);
@@ -821,7 +826,8 @@ public sealed class MainForm : Form
         menu.Items.Add(Loc.T("CopyBoth"), null, (_, _) => CopyText(item.ToString()));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(Loc.T("OpenInBrowser"), null, (_, _) => OpenInBrowser(item)).Enabled = item.Url.Length > 0;
-        if (item.IsListed) menu.Items.Add(Loc.T("EditTask"), null, async (_, _) => await EditTaskAsync(item));
+        if (TicketStore.IsTicket(item)) menu.Items.Add(Loc.T("TicketRemove"), null, (_, _) => RemoveTicket(item));
+        else if (item.IsListed) menu.Items.Add(Loc.T("EditTask"), null, async (_, _) => await EditTaskAsync(item));
         if (LocalTaskStore.IsLocal(item) && ServerTasksAvailable)
             menu.Items.Add(Loc.T("MoveToServer"), null, async (_, _) => await MoveLocalTaskAsync(item));
         if (LocalTaskStore.IsLocal(item))
@@ -1308,7 +1314,7 @@ public sealed class MainForm : Form
         if (_settings.Provider == ProviderKind.GitHub) return new List<string>();
         var projects = _settings.Project.Length > 0
             ? new List<string> { _settings.Project }
-            : _items.Where(i => !LocalTaskStore.IsLocal(i)).Select(i => i.Project).Where(p => p.Length > 0)
+            : _items.Where(i => !IsOffAccount(i)).Select(i => i.Project).Where(p => p.Length > 0)
                 .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(p => p).ToList();
         if (projects.Count == 0) { ShowMessage(Loc.T("PrNoProjects"), MessageBoxIcon.Warning); return null; }
         return projects;
@@ -1319,10 +1325,41 @@ public sealed class MainForm : Form
     /// <summary>Local tasks live beside the server items in the list, the filters and the timers.</summary>
     private void MergeLocalTasks()
     {
-        _items.RemoveAll(LocalTaskStore.IsLocal);
+        _items.RemoveAll(IsOffAccount);
         _items.AddRange(_localTasks.ToWorkItems());
-        if (_activeTask != null && LocalTaskStore.IsLocal(_activeTask))
+        _items.AddRange(_tickets.ToWorkItems());
+        if (_activeTask != null && IsOffAccount(_activeTask))
             _activeTask = _items.FirstOrDefault(i => i.Key == _activeTask.Key) ?? _activeTask;
+    }
+
+    /// <summary>Local tasks and CRM tickets stay in the list whichever account is active.</summary>
+    private static bool IsOffAccount(WorkItem item) => LocalTaskStore.IsLocal(item) || TicketStore.IsTicket(item);
+
+    // ---------- CRM tickets ----------
+
+    private void OpenTickets()
+    {
+        using var form = new TicketsForm(_settings, StartTicket);
+        ShowModal(form);
+    }
+
+    /// <summary>Puts a ticket in the task list and starts timing it.</summary>
+    private void StartTicket(Ticket ticket)
+    {
+        _tickets.Track(ticket);
+        AfterLocalChange();
+        if (_call != null) { ShowMessage(Loc.T("CallInProgress")); return; }
+        if (_items.FirstOrDefault(i => i.Key == TicketStore.KeyPrefix + ticket.Id) is { } item) StartTask(item);
+        UpdateUi();
+    }
+
+    /// <summary>Takes a ticket out of the task list; it stays in the CRM. Unsent time must be dealt with first.</summary>
+    private void RemoveTicket(WorkItem item)
+    {
+        if (IsRunning(item.Key) || _log.PendingSeconds(item.Key) >= 1) { ShowMessage(Loc.T("TicketHasTime"), MessageBoxIcon.Warning); return; }
+        _tickets.Untrack(item);
+        if (_activeTask?.Key == item.Key) _activeTask = null;
+        AfterLocalChange();
     }
 
     private void AfterLocalChange()
@@ -1338,7 +1375,7 @@ public sealed class MainForm : Form
     /// <summary>People seen as assignees in the list, plus the team accounts, for the "Assigned to" box.</summary>
     private List<Person> KnownPeople()
     {
-        var people = _items.Where(i => !LocalTaskStore.IsLocal(i) && i.AssignedTo.Length > 0)
+        var people = _items.Where(i => !IsOffAccount(i) && i.AssignedTo.Length > 0)
             .Select(i => new Person(i.AssignedTo, i.AssignedToAccount))
             .ToList();
         people.AddRange(_settings.TeamEmails.Select(e => new Person(e, e)));
@@ -1354,7 +1391,7 @@ public sealed class MainForm : Form
 
     private async Task AddTaskAsync(Transfer? transfer = null)
     {
-        var serverItems = _items.Where(i => !LocalTaskStore.IsLocal(i)).ToList();
+        var serverItems = _items.Where(i => !IsOffAccount(i)).ToList();
         var projects = serverItems.Select(i => i.Project).Append(_settings.Project)
             .Where(p => p.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(p => p).ToList();
         var options = new TaskEditOptions
@@ -1432,6 +1469,7 @@ public sealed class MainForm : Form
 
     private async Task EditTaskAsync(WorkItem item)
     {
+        if (TicketStore.IsTicket(item)) { OpenTickets(); return; } // tickets are edited in their own window
         var local = _localTasks.Find(item);
         List<string> states;
         if (local != null)
@@ -1561,7 +1599,8 @@ public sealed class MainForm : Form
         var item = SelectedItem;
         if (item == null) { ShowMessage(Loc.T("SelectTask")); return; }
         if (LocalTaskStore.IsLocal(item)) { ShowMessage(Loc.T("LocalNoSend")); return; }
-        if (!ProviderFactory.IsConfigured(_settings)) { ShowMessage(Loc.T("NotConfigured"), MessageBoxIcon.Warning); return; }
+        var isTicket = TicketStore.IsTicket(item);
+        if (!isTicket && !ProviderFactory.IsConfigured(_settings)) { ShowMessage(Loc.T("NotConfigured"), MessageBoxIcon.Warning); return; }
 
         // Close the running segment so it is included, then keep timing afterwards.
         var wasRunning = IsRunning(item.Key);
@@ -1574,20 +1613,26 @@ public sealed class MainForm : Form
             var hours = Math.Round(pending.Sum(e => e.Seconds) / 3600.0, 2);
             if (hours <= 0) { ShowMessage(Loc.T("NothingToPush")); return; }
 
-            using var provider = ProviderFactory.Create(_settings);
-            var states = await provider.GetStatesAsync(item);
+            // A ticket's status is changed in the Tickets window, so only the time goes out here.
+            using var provider = isTicket ? null : ProviderFactory.Create(_settings);
+            var states = provider == null ? new List<string> { item.State } : await provider.GetStatesAsync(item);
 
             string? newState;
             bool reduceRemaining;
             using (var form = new SendTimeForm(item, hours, states, _settings.ReduceRemainingWork,
-                       _settings.Provider == ProviderKind.AzureDevOps))
+                       !isTicket && _settings.Provider == ProviderKind.AzureDevOps))
             {
                 if (ShowModal(form) != DialogResult.OK) return;
                 newState = form.NewState;
                 reduceRemaining = form.ReduceRemaining;
             }
 
-            await provider.LogTimeAsync(item, hours, newState, reduceRemaining);
+            if (provider != null) await provider.LogTimeAsync(item, hours, newState, reduceRemaining);
+            else
+            {
+                using var crm = await CrmService.ConnectAsync(_settings);
+                await crm.LogTimeAsync(TicketStore.IdOf(item), hours);
+            }
             _log.MarkSynced(pending);
             SetStatus("Pushed", hours, item.Title);
             if (newState != null) RebuildFilters(); // the status filter may need the new value
