@@ -1620,11 +1620,17 @@ public sealed class MainForm : Form
             string? newState;
             bool reduceRemaining;
             using (var form = new SendTimeForm(item, hours, states, _settings.ReduceRemainingWork,
-                       !isTicket && _settings.Provider == ProviderKind.AzureDevOps))
+                       !isTicket && _settings.Provider == ProviderKind.AzureDevOps, _settings.SendRounding))
             {
                 if (ShowModal(form) != DialogResult.OK) return;
                 newState = form.NewState;
                 reduceRemaining = form.ReduceRemaining;
+                hours = form.SentHours;
+                if (_settings.SendRounding != form.Rounding)
+                {
+                    _settings.SendRounding = form.Rounding;
+                    SettingsStore.Save(_settings);
+                }
             }
 
             if (provider != null) await provider.LogTimeAsync(item, hours, newState, reduceRemaining);
