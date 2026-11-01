@@ -4,6 +4,9 @@ public enum ProviderKind { AzureDevOps, GitHub }
 
 public enum EntryKind { Work, Call, Meeting }
 
+/// <summary>How time is rounded to whole hours when it is sent.</summary>
+public enum HourRounding { None, Nearest, Up, Down }
+
 public sealed class WorkItem
 {
     /// <summary>Unique across providers, e.g. "ado:1234" or "gh:owner/repo#12".</summary>
@@ -153,6 +156,8 @@ public sealed class AppSettings
     public bool AutoDetectTeams { get; set; } = true;
     public bool ReduceRemainingWork { get; set; } = true;
     public bool AddComment { get; set; } = true;
+    /// <summary>How time is rounded when sent: the choice last made in the send dialog.</summary>
+    public HourRounding SendRounding { get; set; }
     /// <summary>Pause the task timer after this many seconds without keyboard/mouse input. 0 = never.</summary>
     public int IdlePauseSeconds { get; set; } = 300;
     /// <summary>Calls and meetings shorter than this are neither asked about nor recorded. 0 = record all.</summary>
