@@ -86,6 +86,12 @@ public sealed class MainForm : Form
     private readonly ComboBox _customerCombo = NewFilterCombo(260);
     private readonly Label _assigneeLabel = NewFilterLabel();
     private readonly ComboBox _assigneeCombo = NewFilterCombo(160);
+    /// <summary>Completed work of the tasks shown (the selected sprint and filters), with time not yet sent.</summary>
+    private readonly Label _sprintTotalLabel = new()
+    {
+        AutoSize = true, Anchor = AnchorStyles.Right, TextAlign = ContentAlignment.MiddleRight,
+        Margin = new Padding(24, 3, 3, 3), Font = new Font("Segoe UI", 20f, FontStyle.Bold)
+    };
     private readonly TextBox _searchBox = new() { Width = 260, Margin = new Padding(3, 6, 3, 3) };
     private readonly FlowLayoutPanel _actionsFlow = NewSectionFlow();
     private readonly FlowLayoutPanel _filtersFlow = NewSectionFlow();
@@ -229,12 +235,21 @@ public sealed class MainForm : Form
         var buttons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top, Padding = new Padding(0, 6, 0, 0) };
         buttons.Controls.AddRange(new Control[] { _startButton, _stopButton, _callButton, _pushButton, _editTimeButton, _addTaskButton, _editTaskButton });
 
-        var bottom = new FlowLayoutPanel
+        var bottomLeft = new FlowLayoutPanel
         {
-            Dock = DockStyle.Bottom, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false,
-            Padding = new Padding(12, 10, 12, 10)
+            Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = new Padding(0)
         };
-        bottom.Controls.AddRange(new Control[] { _currentLabel, timers, buttons });
+        bottomLeft.Controls.AddRange(new Control[] { _currentLabel, timers, buttons });
+
+        // Timers and buttons on the left, the sprint's completed time on the right (mirrored in Arabic).
+        var bottom = new TableLayoutPanel
+        {
+            Dock = DockStyle.Bottom, AutoSize = true, ColumnCount = 2, RowCount = 1, Padding = new Padding(12, 10, 12, 10)
+        };
+        bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        bottom.Controls.Add(bottomLeft, 0, 0);
+        bottom.Controls.Add(_sprintTotalLabel, 1, 0);
 
         // Docking is resolved from the last-added control backwards, so the fill control goes first.
         Controls.Add(_grid);
@@ -426,6 +441,7 @@ public sealed class MainForm : Form
         Theme.StyleButton(_startMachineButton, Theme.Green);
         Theme.StyleButton(_stopMachineButton, Theme.Coral);
         _taskCaption.ForeColor = _callCaption.ForeColor = _status.ForeColor = _dayStatus.ForeColor = Theme.Muted;
+        _sprintTotalLabel.ForeColor = Theme.Primary;
     }
 
     // ---------- language ----------
@@ -1758,10 +1774,18 @@ public sealed class MainForm : Form
         if (tip.Length > 120) tip = tip[..120];
         if (_tray.Text != tip) _tray.Text = tip;
 
+        // Totals of the tasks on screen, so they follow the sprint and the other filters. Only timeable
+        // rows count: a story's completed work, where set, is usually the sum of its tasks.
+        double completed = 0, unsent = 0;
         foreach (DataGridViewRow row in _grid.Rows)
         {
             if (row.Tag is not WorkItem item) continue;
             var seconds = _log.PendingSeconds(item.Key) + RunningSeconds(item.Key);
+            if (item.CanLogTime)
+            {
+                completed += item.CompletedWork ?? 0;
+                unsent += seconds;
+            }
 
             // Running tasks stand out in green; rows that cannot be timed stay grey.
             var color = IsRunning(item.Key) ? Theme.Green : item.CanLogTime ? Color.Empty : Theme.Muted;
@@ -1771,6 +1795,12 @@ public sealed class MainForm : Form
             var cell = row.Cells["ColUnsynced"];
             if (!Equals(cell.Value, text)) cell.Value = text;
         }
+
+        var sprint = FilterValue(_sprintCombo);
+        var total = Loc.T(sprint.Length > 0 ? "SprintCompleted" : "AllCompleted", completed);
+        // On a second line, so the large text stays narrow.
+        if (unsent >= 60) total += Environment.NewLine + Loc.T("SprintUnsent", unsent / 3600);
+        if (_sprintTotalLabel.Text != total) _sprintTotalLabel.Text = total;
     }
 
     private void UpdateClock()
