@@ -1711,9 +1711,10 @@ public sealed class MainForm : Form
     /// <summary>Counts today's working time on the computer, whether or not a task is being timed.</summary>
     private void TrackWorkday()
     {
-        // Real elapsed time, capped so a sleep/hibernate gap is not counted as work.
+        // Real elapsed time, capped so a sleep/hibernate gap is not counted as work, and never
+        // negative: the clock can jump back (time sync, manual change, VM resume).
         var now = DateTime.UtcNow;
-        var elapsed = Math.Min((now - _lastTickUtc).TotalSeconds, 5);
+        var elapsed = Math.Clamp((now - _lastTickUtc).TotalSeconds, 0, 5);
         _lastTickUtc = now;
 
         var limit = _settings.IdlePauseSeconds > 0 ? _settings.IdlePauseSeconds : DefaultActivityIdleSeconds;

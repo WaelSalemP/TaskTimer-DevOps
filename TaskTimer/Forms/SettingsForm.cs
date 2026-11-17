@@ -129,7 +129,12 @@ public sealed class SettingsForm : Form
             DialogResult = DialogResult.Abort;
             Close();
         };
-        buttons.Controls.AddRange(new Control[] { _cancel, _save, _test, _deleteAccount });
+        // Shows what the Teams call detection sees right now; most useful during a call.
+        var testDetection = new Button { Text = Loc.T("TestDetection"), AutoSize = true, Padding = new Padding(8, 3, 8, 3) };
+        Theme.StyleButton(testDetection, Theme.Neutral);
+        testDetection.Click += (_, _) => MessageBox.Show(this, TeamsCallDetector.Describe(), Loc.T("TestDetection"),
+            MessageBoxButtons.OK, MessageBoxIcon.Information, MessageBoxDefaultButton.Button1, Loc.MsgOptions);
+        buttons.Controls.AddRange(new Control[] { _cancel, _save, _test, testDetection, _deleteAccount });
 
         Controls.Add(table);
         Controls.Add(buttons);
