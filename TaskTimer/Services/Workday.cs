@@ -73,11 +73,18 @@ public sealed class WorkdayTracker
         var cutoff = DateTime.Now.AddDays(-90).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         foreach (var old in tracker.Days.Keys.Where(k => string.CompareOrdinal(k, cutoff) < 0).ToList())
             tracker.Days.Remove(old);
+        // Repair days saved by older versions, which could subtract time after a clock change.
+        foreach (var day in tracker.Days.Values)
+        {
+            day.ActiveSeconds = Math.Max(day.ActiveSeconds, 0);
+            day.RemoteSeconds = Math.Clamp(day.RemoteSeconds, 0, day.ActiveSeconds);
+        }
         return tracker;
     }
 
     public void Add(double seconds, bool remote)
     {
+        if (!(seconds > 0)) return; // also rejects NaN
         var day = Today;
         day.ActiveSeconds += seconds;
         if (remote) day.RemoteSeconds += seconds;

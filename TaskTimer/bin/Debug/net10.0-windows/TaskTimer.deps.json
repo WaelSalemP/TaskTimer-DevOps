@@ -7,8 +7,42 @@
   "targets": {
     ".NETCoreApp,Version=v10.0": {
       "TaskTimer/1.0.0": {
+        "dependencies": {
+          "Microsoft.Identity.Client": "4.91.0",
+          "Microsoft.Identity.Client.Extensions.Msal": "4.91.0"
+        },
         "runtime": {
           "TaskTimer.dll": {}
+        }
+      },
+      "Microsoft.Identity.Client/4.91.0": {
+        "dependencies": {
+          "Microsoft.IdentityModel.Abstractions": "8.14.0"
+        },
+        "runtime": {
+          "lib/net8.0/Microsoft.Identity.Client.dll": {
+            "assemblyVersion": "4.91.0.0",
+            "fileVersion": "4.91.0.0"
+          }
+        }
+      },
+      "Microsoft.Identity.Client.Extensions.Msal/4.91.0": {
+        "dependencies": {
+          "Microsoft.Identity.Client": "4.91.0"
+        },
+        "runtime": {
+          "lib/net8.0/Microsoft.Identity.Client.Extensions.Msal.dll": {
+            "assemblyVersion": "4.91.0.0",
+            "fileVersion": "4.91.0.0"
+          }
+        }
+      },
+      "Microsoft.IdentityModel.Abstractions/8.14.0": {
+        "runtime": {
+          "lib/net9.0/Microsoft.IdentityModel.Abstractions.dll": {
+            "assemblyVersion": "8.14.0.0",
+            "fileVersion": "8.14.0.60815"
+          }
         }
       }
     }
@@ -18,6 +52,27 @@
       "type": "project",
       "serviceable": false,
       "sha512": ""
+    },
+    "Microsoft.Identity.Client/4.91.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-u+j8hdM/Eez1j0rQVodY+4MRfsLgmsskjMgVkf74xkLWssbW4mqSgz0Tx4H0CJTtrDes00M5s4545rbLN61/uw==",
+      "path": "microsoft.identity.client/4.91.0",
+      "hashPath": "microsoft.identity.client.4.91.0.nupkg.sha512"
+    },
+    "Microsoft.Identity.Client.Extensions.Msal/4.91.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-6MGkonDQNMggRh1AGvzjlmnn0NLwrYq8EOBhSGSkPhL5/1Tajwe0YUbtDjbcxvFIhbGd0+DpwxFmphgUHm31Og==",
+      "path": "microsoft.identity.client.extensions.msal/4.91.0",
+      "hashPath": "microsoft.identity.client.extensions.msal.4.91.0.nupkg.sha512"
+    },
+    "Microsoft.IdentityModel.Abstractions/8.14.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-iwbCpSjD3ehfTwBhtSNEtKPK0ICun6ov7Ibx6ISNA9bfwIyzI2Siwyi9eJFCJBwxowK9xcA1mj+jBWiigeqgcQ==",
+      "path": "microsoft.identitymodel.abstractions/8.14.0",
+      "hashPath": "microsoft.identitymodel.abstractions.8.14.0.nupkg.sha512"
     }
   }
 }

@@ -19,3 +19,6 @@ C:\Users\localadmin\AppData\Local\Temp\tt-build\TaskTimer.dll
 C:\Users\localadmin\AppData\Local\Temp\tt-build\TaskTimer.pdb
 C:\Temp\DevOps\TaskTimer\obj\Debug\net10.0-windows\TaskTimer.csproj.AssemblyReference.cache
 C:\Temp\DevOps\TaskTimer\obj\Debug\net10.0-windows\TaskTimer.csproj.Up2Date
+C:\Temp\DevOps\TaskTimer\bin\Debug\net10.0-windows\Microsoft.Identity.Client.dll
+C:\Temp\DevOps\TaskTimer\bin\Debug\net10.0-windows\Microsoft.Identity.Client.Extensions.Msal.dll
+C:\Temp\DevOps\TaskTimer\bin\Debug\net10.0-windows\Microsoft.IdentityModel.Abstractions.dll
